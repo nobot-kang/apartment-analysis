@@ -1,0 +1,37 @@
+name: Monthly Data Update
+
+on:
+  schedule:
+    - cron: '0 1 1 * *'  # 매월 1일 01:00 UTC (한국 10:00)
+  workflow_dispatch:       # 수동 실행 허용
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run data pipeline
+        env:
+          MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
+          ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
+        run: python scripts/run_full_pipeline.py --mode incremental
+
+      - name: Build summary
+        run: python scripts/build_summary.py
+
+      - name: Commit and push processed data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/processed/
+          git diff --staged --quiet || git commit -m "chore: monthly data update $(date +'%Y-%m')"
+          git push
