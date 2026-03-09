@@ -25,3 +25,6 @@ statsmodels>=0.14.0
 
 # 테스트
 pytest>=8.0.0
+
+# 개발/분석 노트북
+notebook>=7.0.0

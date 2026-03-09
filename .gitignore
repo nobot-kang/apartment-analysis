@@ -28,6 +28,7 @@ Thumbs.db
 venv/
 .venv/
 env/
+uv.lock
 
 # uv
 .python-version
