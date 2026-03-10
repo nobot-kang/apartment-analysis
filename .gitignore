@@ -2,6 +2,7 @@
 .env
 *.env
 secrets.toml
+.cursor/
 
 # Raw 데이터 (용량 이슈 + 재현 가능)
 data/raw/
@@ -35,3 +36,4 @@ uv.lock
 
 # log
 logs/
+*.json

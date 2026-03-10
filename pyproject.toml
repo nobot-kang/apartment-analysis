@@ -21,6 +21,7 @@ dependencies = [
     "pytest>=8.0.0",
     "notebook>=7.0.0",
     "pandas-stubs==3.0.0.260204",
+    "xmltodict>=0.13.0",
 ]
 
 [project.optional-dependencies]
