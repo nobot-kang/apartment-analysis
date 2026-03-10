@@ -109,132 +109,99 @@ class AggregationPipeline:
         return pd.concat(dfs, ignore_index=True)
 
     def build_monthly_trade_summary(self) -> pd.DataFrame:
-        """매매 Raw 데이터로 월별 × 자치구별 집계를 생성한다.
+        """전처리된 매매 데이터를 로드하여 월별 × 지역별 집계를 생성한다.
 
         Returns:
             월별 매매 집계 DataFrame.
         """
-        logger.info("매매 월별 집계 시작")
-        trade_dir = self.molit_dir / "apt_trade"
-        df = self._load_parquet_batch(trade_dir)
+        logger.info("매매 월별 집계 시작 (전처리 데이터 사용)")
+        trade_path = self.output_dir / "apt_trade.parquet"
+        
+        if not trade_path.exists():
+            logger.warning(f"전처리된 매매 데이터가 없습니다: {trade_path}")
+            return pd.DataFrame()
 
-        if df.empty:
-            logger.warning("매매 데이터가 없어 집계를 건너뜁니다.")
-            return df
+        df = pd.read_parquet(trade_path)
 
-        # 컬럼명 정규화 (API 버전에 따라 컬럼명이 다를 수 있음)
-        col_map = {
-            "거래금액": "dealAmount",
-            "전용면적": "excluUseAr",
-            "건축년도": "buildYear",
-        }
-        for kor, eng in col_map.items():
-            if kor in df.columns and eng not in df.columns:
-                df = df.rename(columns={kor: eng})
+        # 집계 연월 추출 (YYYYMM)
+        df["ym"] = df["date"].dt.strftime("%Y%m")
 
-        # 숫자 변환
-        if "dealAmount" in df.columns:
-            df["dealAmount"] = (
-                df["dealAmount"]
-                .astype(str)
-                .str.replace(",", "", regex=False)
-                .str.strip()
-            )
-            df["dealAmount"] = pd.to_numeric(df["dealAmount"], errors="coerce")
+        # 지역 코드 추출 (dong_repr 에 포함된 괄호 안의 코드 활용)
+        # 예: "신림동(11620)" -> "11620"
+        df["_lawd_cd"] = df["dong_repr"].str.extract(r"\((\d+)\)")
+        df["_region_name"] = df["dong_repr"].str.split("(").str[0]
 
-        if "excluUseAr" in df.columns:
-            df["excluUseAr"] = pd.to_numeric(df["excluUseAr"], errors="coerce")
+        # 이상치 제거 (상하위 1%) - 전처리 단계에서 수행하지 않았다면 여기서 수행
+        q_low = df["price"].quantile(0.01)
+        q_high = df["price"].quantile(0.99)
+        df = df[(df["price"] >= q_low) & (df["price"] <= q_high)].copy()
 
-        if "buildYear" in df.columns:
-            df["buildYear"] = pd.to_numeric(df["buildYear"], errors="coerce")
-
-        # 이상치 제거 (상하위 1%)
-        if "dealAmount" in df.columns:
-            q_low = df["dealAmount"].quantile(0.01)
-            q_high = df["dealAmount"].quantile(0.99)
-            df = df[(df["dealAmount"] >= q_low) & (df["dealAmount"] <= q_high)]
-
-        # 면적 구간 파생
-        if "excluUseAr" in df.columns:
-            df["area_group"] = pd.cut(
-                df["excluUseAr"],
-                bins=self.AREA_BINS,
-                labels=self.AREA_LABELS,
-                right=True,
-            )
-
-        # 집계 연월 (파일명 기준)
-        df["ym"] = df["_deal_ym"]
+        # 면적 구간 파생 (분석용 area 사용)
+        df["area_group"] = pd.cut(
+            df["area"],
+            bins=self.AREA_BINS,
+            labels=self.AREA_LABELS,
+            right=True,
+        )
 
         # 그룹 키
         group_cols = ["ym", "_lawd_cd", "_region_name"]
-        agg_dict: dict[str, list[tuple[str, str]]] = {
-            "거래건수": [("dealAmount", "count")],
-            "평균거래금액": [("dealAmount", "mean")],
-            "중앙값거래금액": [("dealAmount", "median")],
-        }
 
         # 기본 집계
         summary = (
             df.groupby(group_cols, observed=True)
             .agg(
-                거래건수=("dealAmount", "size"),
-                평균거래금액=("dealAmount", "mean"),
-                중앙값거래금액=("dealAmount", "median"),
+                거래건수=("price", "size"),
+                평균거래금액=("price", "mean"),
+                중앙값거래금액=("price", "median"),
+                평균84환산금액=("price_std84", "mean"),
+                중앙값84환산금액=("price_std84", "median"),
             )
             .reset_index()
         )
 
         # 절사평균
         trim_means = (
-            df.groupby(group_cols, observed=True)["dealAmount"]
+            df.groupby(group_cols, observed=True)["price"]
             .apply(self._trimmed_mean)
             .reset_index(name="절사평균거래금액")
         )
         summary = summary.merge(trim_means, on=group_cols, how="left")
 
         # 평균 전용면적
-        if "excluUseAr" in df.columns:
-            avg_area = (
-                df.groupby(group_cols, observed=True)["excluUseAr"]
-                .mean()
-                .reset_index(name="평균전용면적")
-            )
-            summary = summary.merge(avg_area, on=group_cols, how="left")
+        avg_area = (
+            df.groupby(group_cols, observed=True)["area"]
+            .mean()
+            .reset_index(name="평균전용면적")
+        )
+        summary = summary.merge(avg_area, on=group_cols, how="left")
 
-        # 평균 건물 연령
-        if "buildYear" in df.columns:
-            avg_year = (
-                df.groupby(group_cols, observed=True)["buildYear"]
-                .mean()
-                .reset_index(name="평균건축연도")
-            )
-            summary = summary.merge(avg_year, on=group_cols, how="left")
-            # 연도 컬럼에서 연령 계산
-            summary["평균건물연령"] = (
-                pd.to_datetime(summary["ym"], format="%Y%m").dt.year
-                - summary["평균건축연도"]
-            )
+        # 평균 건물 연령 (전처리된 age 사용)
+        avg_age = (
+            df.groupby(group_cols, observed=True)["age"]
+            .mean()
+            .reset_index(name="평균건물연령")
+        )
+        summary = summary.merge(avg_age, on=group_cols, how="left")
 
         # 면적대별 평균 거래금액
-        if "area_group" in df.columns:
-            area_avg = (
-                df.groupby(group_cols + ["area_group"], observed=True)["dealAmount"]
-                .mean()
-                .reset_index()
-                .pivot_table(
-                    index=group_cols,
-                    columns="area_group",
-                    values="dealAmount",
-                    observed=True,
-                )
-                .reset_index()
+        area_avg = (
+            df.groupby(group_cols + ["area_group"], observed=True)["price"]
+            .mean()
+            .reset_index()
+            .pivot_table(
+                index=group_cols,
+                columns="area_group",
+                values="price",
+                observed=True,
             )
-            area_avg.columns = [
-                f"평균거래금액_{c}" if c in self.AREA_LABELS else c
-                for c in area_avg.columns
-            ]
-            summary = summary.merge(area_avg, on=group_cols, how="left")
+            .reset_index()
+        )
+        area_avg.columns = [
+            f"평균거래금액_{c}" if c in self.AREA_LABELS else c
+            for c in area_avg.columns
+        ]
+        summary = summary.merge(area_avg, on=group_cols, how="left")
 
         # 저장
         out_path = self.output_dir / "monthly_trade_summary.parquet"
@@ -243,58 +210,41 @@ class AggregationPipeline:
         return summary
 
     def build_monthly_rent_summary(self) -> pd.DataFrame:
-        """전월세 Raw 데이터로 월별 × 자치구별 집계를 생성한다.
+        """전처리된 전월세 데이터를 로드하여 월별 × 지역별 집계를 생성한다.
 
         Returns:
             월별 전월세 집계 DataFrame.
         """
-        logger.info("전월세 월별 집계 시작")
-        rent_dir = self.molit_dir / "apt_rent"
-        df = self._load_parquet_batch(rent_dir)
+        logger.info("전월세 월별 집계 시작 (전처리 데이터 사용)")
+        rent_path = self.output_dir / "apt_rent.parquet"
+        
+        if not rent_path.exists():
+            logger.warning(f"전처리된 전월세 데이터가 없습니다: {rent_path}")
+            return pd.DataFrame()
 
-        if df.empty:
-            logger.warning("전월세 데이터가 없어 집계를 건너뜁니다.")
-            return df
+        df = pd.read_parquet(rent_path)
 
-        # 컬럼명 정규화
-        col_map = {
-            "보증금액": "deposit",
-            "월세금액": "monthlyRent",
-            "전월세구분": "rentType",
-            "전용면적": "excluUseAr",
-        }
-        for kor, eng in col_map.items():
-            if kor in df.columns and eng not in df.columns:
-                df = df.rename(columns={kor: eng})
+        df["ym"] = df["date"].dt.strftime("%Y%m")
+        df["_lawd_cd"] = df["dong_repr"].str.extract(r"\((\d+)\)")
+        df["_region_name"] = df["dong_repr"].str.split("(").str[0]
 
-        # 숫자 변환
-        for col in ["deposit", "monthlyRent"]:
-            if col in df.columns:
-                df[col] = (
-                    df[col]
-                    .astype(str)
-                    .str.replace(",", "", regex=False)
-                    .str.strip()
-                )
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df["ym"] = df["_deal_ym"]
         group_cols = ["ym", "_lawd_cd", "_region_name"]
 
-        # 전세/월세 구분 포함 집계
-        if "rentType" in df.columns:
-            group_cols_with_type = group_cols + ["rentType"]
-        else:
-            group_cols_with_type = group_cols
-
-        agg_parts: dict[str, tuple[str, str]] = {"거래건수": ("deposit", "size")}
-        if "deposit" in df.columns:
-            agg_parts["평균보증금"] = ("deposit", "mean")
-        if "monthlyRent" in df.columns:
-            agg_parts["평균월세"] = ("monthlyRent", "mean")
+        # 전세/월세 구분 포함 집계 (contract_type 또는 deposit/monthly_rent 기준)
+        # 원본 데이터의 rentType이 전처리 과정에서 보존되지 않았다면 deposit/monthly_rent로 판단
+        # 여기서는 간단히 보증금과 월세 각각의 평균을 집계
+        
+        agg_parts = {
+            "거래건수": ("deposit", "size"),
+            "평균보증금": ("deposit", "mean"),
+            "중앙값보증금": ("deposit", "median"),
+            "평균월세": ("monthly_rent", "mean"),
+            "중앙값월세": ("monthly_rent", "median"),
+            "평균84환산보증금": ("deposit_std84", "mean"),
+        }
 
         summary = (
-            df.groupby(group_cols_with_type, observed=True)
+            df.groupby(group_cols, observed=True)
             .agg(**agg_parts)
             .reset_index()
         )

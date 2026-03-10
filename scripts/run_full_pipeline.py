@@ -42,6 +42,9 @@ from config.settings import (
     get_api_key,
 )
 from pipelines.aggregation_pipeline import AggregationPipeline
+from pipelines.building_ledger_pipeline import BuildingLedgerPipeline
+from pipelines.building_ledger_summary import BuildingLedgerSummarizer
+from pipelines.data_preprocessing import DataPreprocessor
 from pipelines.ecos_pipeline import EcosPipeline
 from pipelines.market_pipeline import MarketPipeline
 from pipelines.molit_pipeline import MolitPipeline
@@ -119,6 +122,35 @@ def run_market() -> None:
     pipeline.run_all(start=START_DATE, end=END_DATE)
 
 
+def run_building_ledger(mode: str = "incremental") -> None:
+    """건축물대장 수집을 실행한다.
+
+    Args:
+        mode: ``incremental`` 또는 ``retry``.
+    """
+    pipeline = BuildingLedgerPipeline()
+    if mode == "retry":
+        pipeline.retry_failed()
+    else:
+        pipeline.run_full_collection()
+
+
+def run_preprocessing() -> None:
+    """Raw 데이터를 통합하고 1차 전처리를 수행한다."""
+    logger.info("--- 1차 전처리 (Raw 통합 및 피처 생성) ---")
+    
+    # 1. 아파트 정보 lookup table 생성
+    logger.info("건축물대장 요약 중...")
+    ledger_summarizer = BuildingLedgerSummarizer()
+    ledger_summarizer.summarize()
+
+    # 2. 매매/전월세 통합 및 가격 보정
+    logger.info("매매/전월세 데이터 통합 및 전처리 중...")
+    preprocessor = DataPreprocessor()
+    preprocessor.preprocess_trade()
+    preprocessor.preprocess_rent()
+
+
 def run_aggregation() -> None:
     """집계 파이프라인을 실행한다."""
     pipeline = AggregationPipeline()
@@ -164,10 +196,27 @@ def main() -> None:
         action="store_true",
         help="집계 건너뛰기",
     )
+    parser.add_argument(
+        "--skip-building-ledger",
+        action="store_true",
+        help="건축물대장 수집 건너뛰기",
+    )
+    parser.add_argument(
+        "--building-ledger-only",
+        action="store_true",
+        help="건축물대장만 수집",
+    )
     args = parser.parse_args()
 
     _configure_logger()
     logger.info("=== 전체 파이프라인 시작 ===")
+
+    # 건축물대장만 수집하는 단축 모드
+    if args.building_ledger_only:
+        logger.info("--- 건축물대장 수집 ---")
+        run_building_ledger(mode=args.mode)
+        logger.info("=== 건축물대장 수집 완료 ===")
+        return
 
     # 1. 국토부 실거래가
     if not args.skip_molit:
@@ -188,7 +237,16 @@ def main() -> None:
         logger.info("--- yfinance 시장 데이터 수집 ---")
         run_market()
 
-    # 4. 집계
+    # 4. 건축물대장
+    if not args.skip_building_ledger:
+        logger.info("--- 건축물대장 수집 ---")
+        run_building_ledger(mode=args.mode)
+
+    # 5. 1차 전처리 (통합 및 피처 생성)
+    if not args.skip_aggregation:
+        run_preprocessing()
+
+    # 6. 집계
     if not args.skip_aggregation:
         logger.info("--- 집계 파이프라인 ---")
         run_aggregation()
