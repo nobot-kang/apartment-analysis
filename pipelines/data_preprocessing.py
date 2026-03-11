@@ -198,11 +198,44 @@ class DataPreprocessor:
 
         return df
 
+    def _save_in_chunks(self, df: pd.DataFrame, prefix: str) -> None:
+        """데이터를 5년 단위로 쪼개서 저장한다.
+
+        - ~2014 (2010-2014 포함)
+        - 2015-2019
+        - 2020-2024
+        - 2025~
+        
+        Args:
+            df: 저장할 DataFrame (date 컬럼 필수).
+            prefix: 파일명 접두사 (예: 'apt_trade', 'apt_rent').
+        """
+        ranges = [
+            (None, 2014, "until_2014"),
+            (2015, 2019, "2015_2019"),
+            (2020, 2024, "2020_2024"),
+            (2025, None, "2025_after"),
+        ]
+
+        for start_year, end_year, suffix in ranges:
+            chunk = df.copy()
+            if start_year:
+                chunk = chunk[chunk["date"].dt.year >= start_year]
+            if end_year:
+                chunk = chunk[chunk["date"].dt.year <= end_year]
+            
+            if chunk.empty:
+                continue
+                
+            out_path = self.processed_dir / f"{prefix}_{suffix}.parquet"
+            chunk.to_parquet(out_path, index=False)
+            logger.info(f"조각 저장 완료: {out_path.name} ({len(chunk)}건)")
+
     def preprocess_trade(self) -> pd.DataFrame:
         """매매 데이터를 전처리한다.
 
         취소된 거래(cdealType == 'O')를 제외하고, 
-        schema에 정의된 컬럼만 추출하여 저장한다.
+        schema에 정의된 컬럼만 추출하여 5년 단위 조각으로 저장한다.
         """
         logger.info("매매 데이터 전처리 시작")
         df = self._load_all_parquets("apt_trade")
@@ -210,7 +243,6 @@ class DataPreprocessor:
             return df
 
         # 1) 취소 거래 제외
-        # cdealType이 'O'인 경우 해제된 거래임
         if "cdealType" in df.columns:
             initial_count = len(df)
             df = df[df["cdealType"] != "O"].copy()
@@ -223,7 +255,7 @@ class DataPreprocessor:
         # 3) 매매 전용 컬럼: price (dealAmount)
         df["price"] = self._clean_amount(df["dealAmount"])
 
-        # 4) 가격 파생 컬럼 생성 (㎡당가, 평당가, 84㎡ 환산가)
+        # 4) 가격 파생 컬럼 생성
         df = self._add_trade_price_columns(df)
 
         # 5) 필요한 컬럼만 선택
@@ -232,40 +264,52 @@ class DataPreprocessor:
             "area", "floor", "construction_year", "age",
             "dong", "apt_name", "area_repr", "dong_repr", "apt_name_repr", "aptSeq"
         ]
-        # 존재하는 컬럼만 선택 (안전장치)
         cols = [c for c in cols if c in df.columns]
         processed_df = df[cols].sort_values("date").reset_index(drop=True)
 
-        # 6) 저장
+        # 6) 조각내어 저장 (GitHub 용량 제한 회피)
+        self._save_in_chunks(processed_df, "apt_trade")
+        
+        # 하위 호환성 또는 집계 편의를 위해 전체 파일도 일단 유지 (필요 없으면 삭제 가능)
+        # git push 시에는 .gitignore 에 등록하거나 삭제하는 것이 좋음
         out_path = self.processed_dir / "apt_trade.parquet"
         processed_df.to_parquet(out_path, index=False)
-        logger.info(f"매매 전처리 완료: {out_path} ({len(processed_df)}건)")
+        logger.info(f"매매 전처리 완료 (전체): {out_path} ({len(processed_df)}건)")
 
         return processed_df
 
     def preprocess_rent(self) -> pd.DataFrame:
-        """전월세 데이터를 전처리한다."""
+        """전월세 데이터를 전처리하여 5년 단위 조각으로 저장한다."""
         logger.info("전월세 데이터 전처리 시작")
         df = self._load_all_parquets("apt_rent")
         if df.empty:
             return df
 
-        # 전월세는 취소 거래 여부(cdealType)가 원본 API에 없는 경우가 많음
-        # 있다면 필터링
         if "cdealType" in df.columns:
             df = df[df["cdealType"] != "O"].copy()
 
         # 1) 기본 컬럼 생성
         df = self._create_base_columns(df)
 
-        # 2) 전월세 전용 컬럼: deposit, monthlyRent
+        # 2) 전월세 전용 컬럼
         df["deposit"] = self._clean_amount(df["deposit"])
         df["monthly_rent"] = self._clean_amount(df["monthlyRent"])
 
-        # 3) 가격 파생 컬럼 생성 (보증금/월세 단가, 84㎡ 환산)
+        # rentType 생성 (Raw 데이터에 없는 경우 대비: 월세가 0이면 전세, 아니면 월세)
+        if "rentType" not in df.columns:
+            df["rentType"] = np.where(df["monthly_rent"] == 0, "전세", "월세")
+        else:
+            # 기존 rentType이 있다면 공백 제거 및 표준화
+            df["rentType"] = df["rentType"].astype(str).str.strip()
+            # "준월세", "준전세" 등도 "월세"로 간주하거나 그대로 둘 수 있지만, 
+            # 여기서는 대시보드 표시를 위해 "전세" / "월세"로 단순화 시도 (필요 시 수정)
+            df.loc[df["rentType"].isin(["월세", "준월세", "준전세"]), "rentType"] = "월세"
+            df.loc[df["rentType"] == "전세", "rentType"] = "전세"
+
+        # 3) 가격 파생 컬럼 생성
         df = self._add_rent_price_columns(df)
 
-        # 4) 기타 컬럼 (schema 확장)
+        # 4) 기타 컬럼
         rename_map = {
             "contractType": "contract_type",
             "contractTerm": "contract_term",
@@ -283,15 +327,17 @@ class DataPreprocessor:
             "monthly_rent", "monthly_rent_per_m2", "monthly_rent_per_py",
             "area", "floor", "construction_year", "age",
             "dong", "apt_name", "area_repr", "dong_repr", "apt_name_repr", "aptSeq",
-            "contract_type", "contract_term", "use_rr_right"
+            "rentType", "contract_type", "contract_term", "use_rr_right"
         ]
         cols = [c for c in cols if c in df.columns]
         processed_df = df[cols].sort_values("date").reset_index(drop=True)
 
-        # 6) 저장
+        # 6) 조각내어 저장
+        self._save_in_chunks(processed_df, "apt_rent")
+
         out_path = self.processed_dir / "apt_rent.parquet"
         processed_df.to_parquet(out_path, index=False)
-        logger.info(f"전월세 전처리 완료: {out_path} ({len(processed_df)}건)")
+        logger.info(f"전월세 전처리 완료 (전체): {out_path} ({len(processed_df)}건)")
 
         return processed_df
 

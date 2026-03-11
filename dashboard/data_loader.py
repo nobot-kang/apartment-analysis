@@ -44,6 +44,30 @@ def _normalize_month_column(df: pd.DataFrame, ym_column: str = "ym") -> pd.DataF
 
 
 @st.cache_data(ttl=3600)
+def load_processed_data(data_type: str = "trade") -> pd.DataFrame:
+    """전처리된 매매/전월세 상세 데이터(조각들)를 로드하여 통합한다.
+
+    Args:
+        data_type: 'trade' (매매) 또는 'rent' (전월세).
+
+    Returns:
+        통합된 상세 DataFrame.
+    """
+    prefix = "apt_trade" if data_type == "trade" else "apt_rent"
+    files = sorted(PROCESSED_DIR.glob(f"{prefix}_*.parquet"))
+    
+    if not files:
+        # 조각이 없으면 전체 파일 시도
+        full_path = PROCESSED_DIR / f"{prefix}.parquet"
+        if full_path.exists():
+            return pd.read_parquet(full_path)
+        return pd.DataFrame()
+
+    dfs = [pd.read_parquet(f) for f in files]
+    return pd.concat(dfs, ignore_index=True)
+
+
+@st.cache_data(ttl=3600)
 def load_trade_summary() -> pd.DataFrame:
     """매매 월별 집계 데이터를 로드한다.
 

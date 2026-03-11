@@ -108,20 +108,47 @@ class AggregationPipeline:
 
         return pd.concat(dfs, ignore_index=True)
 
+    def _load_processed_chunks(self, prefix: str) -> pd.DataFrame:
+        """prefix로 시작하는 모든 전처리된 parquet 조각을 읽어 합친다.
+
+        Args:
+            prefix: 'apt_trade' 또는 'apt_rent'.
+
+        Returns:
+            합쳐진 DataFrame.
+        """
+        files = sorted(self.output_dir.glob(f"{prefix}_*.parquet"))
+        if not files:
+            # 조각 파일이 없으면 전체 파일 시도 (하위 호환)
+            full_path = self.output_dir / f"{prefix}.parquet"
+            if full_path.exists():
+                return pd.read_parquet(full_path)
+            logger.warning(f"전처리된 {prefix} 데이터 조각을 찾을 수 없습니다.")
+            return pd.DataFrame()
+
+        dfs = []
+        for f in files:
+            try:
+                dfs.append(pd.read_parquet(f))
+            except Exception as exc:
+                logger.error(f"조각 로드 실패: {f.name} - {exc}")
+
+        if not dfs:
+            return pd.DataFrame()
+            
+        return pd.concat(dfs, ignore_index=True)
+
     def build_monthly_trade_summary(self) -> pd.DataFrame:
         """전처리된 매매 데이터를 로드하여 월별 × 지역별 집계를 생성한다.
 
         Returns:
             월별 매매 집계 DataFrame.
         """
-        logger.info("매매 월별 집계 시작 (전처리 데이터 사용)")
-        trade_path = self.output_dir / "apt_trade.parquet"
+        logger.info("매매 월별 집계 시작 (전처리 데이터 조각 사용)")
+        df = self._load_processed_chunks("apt_trade")
         
-        if not trade_path.exists():
-            logger.warning(f"전처리된 매매 데이터가 없습니다: {trade_path}")
+        if df.empty:
             return pd.DataFrame()
-
-        df = pd.read_parquet(trade_path)
 
         # 집계 연월 추출 (YYYYMM)
         df["ym"] = df["date"].dt.strftime("%Y%m")
@@ -215,25 +242,23 @@ class AggregationPipeline:
         Returns:
             월별 전월세 집계 DataFrame.
         """
-        logger.info("전월세 월별 집계 시작 (전처리 데이터 사용)")
-        rent_path = self.output_dir / "apt_rent.parquet"
+        logger.info("전월세 월별 집계 시작 (전처리 데이터 조각 사용)")
+        df = self._load_processed_chunks("apt_rent")
         
-        if not rent_path.exists():
-            logger.warning(f"전처리된 전월세 데이터가 없습니다: {rent_path}")
+        if df.empty:
             return pd.DataFrame()
-
-        df = pd.read_parquet(rent_path)
 
         df["ym"] = df["date"].dt.strftime("%Y%m")
         df["_lawd_cd"] = df["dong_repr"].str.extract(r"\((\d+)\)")
         df["_region_name"] = df["dong_repr"].str.split("(").str[0]
 
-        group_cols = ["ym", "_lawd_cd", "_region_name"]
+        # rentType을 반드시 포함하여 집계
+        group_cols = ["ym", "date", "_lawd_cd", "_region_name", "rentType"]
 
-        # 전세/월세 구분 포함 집계 (contract_type 또는 deposit/monthly_rent 기준)
-        # 원본 데이터의 rentType이 전처리 과정에서 보존되지 않았다면 deposit/monthly_rent로 판단
-        # 여기서는 간단히 보증금과 월세 각각의 평균을 집계
-        
+        # 만약 전처리 과정에서 rentType이 생성되지 않았다면 (비정상 케이스 대비)
+        if "rentType" not in df.columns:
+            df["rentType"] = np.where(df["monthly_rent"] == 0, "전세", "월세")
+
         agg_parts = {
             "거래건수": ("deposit", "size"),
             "평균보증금": ("deposit", "mean"),
@@ -311,3 +336,8 @@ class AggregationPipeline:
         self.build_monthly_rent_summary()
         self.build_macro_monthly()
         logger.info("전체 집계 파이프라인 완료")
+
+
+if __name__ == "__main__":
+    pipeline = AggregationPipeline()
+    pipeline.run_all()

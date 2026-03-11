@@ -86,7 +86,7 @@ class EcosPipeline:
             rows = data["StatisticSearch"].get("row", [])
             all_rows.extend(rows)
 
-            total_count = int(data["StatisticSearch"].get("list_cnt", 0))
+            total_count = int(data["StatisticSearch"].get("list_total_count", 0))
 
             # 모든 데이터를 가져왔으면 종료
             if start_idx + len(rows) - 1 >= total_count:

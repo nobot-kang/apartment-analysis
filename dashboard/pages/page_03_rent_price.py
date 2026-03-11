@@ -154,9 +154,11 @@ def render() -> None:
             x="date",
             y="거래건수",
             color="rentType",
-            barmode="stack",
+            barmode="group",
+            text="거래건수",
             title="전세/월세 거래건수 추이",
             labels={"date": "연월", "거래건수": "거래건수", "rentType": "유형"},
         )
+        fig_type.update_traces(textposition="outside")
         fig_type.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
         st.plotly_chart(fig_type, width="stretch")

@@ -9,6 +9,8 @@ data/raw/
 
 # Processed 데이터 (재생성 가능)
 # data/processed/
+data/processed/apt_trade.parquet
+data/processed/apt_rent.parquet
 
 # Python 캐시
 __pycache__/
