@@ -1,124 +1,94 @@
-"""Page 02 – 매매가 분석.
-
-지역 × 면적대별 매매가 시계열, 거래량 바차트, YoY 상승률 등을 표시한다.
-"""
+﻿"""Page 02 - Level 2 심화 비교 분석."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-import plotly.express as px
-import plotly.graph_objects as go
+import pandas as pd
 import streamlit as st
 
 _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from dashboard.data_loader import load_trade_summary, get_region_options
-from analysis.trend import add_trend_columns
+from analysis.common import get_scope_codes
+from analysis.level2 import (
+    build_conversion_rate_chart,
+    build_district_year_heatmap,
+    build_floor_premium_chart,
+    build_volume_price_lag_chart,
+    build_yoy_map,
+    load_conversion_rate_data,
+    load_floor_premium_data,
+    load_volume_price_lag_data,
+    load_yoy_map_data,
+)
+from dashboard.data_loader import load_trade_summary
+
+
+@st.cache_data(ttl=3600)
+def _get_floor_data(region_codes: tuple[str, ...], years: tuple[int, ...]) -> pd.DataFrame:
+    return load_floor_premium_data(list(region_codes), list(years))
+
+
+@st.cache_data(ttl=3600)
+def _get_yoy_map(target_year: int) -> pd.DataFrame:
+    return load_yoy_map_data(target_year)
+
+
+@st.cache_data(ttl=3600)
+def _get_lag_data(scope_name: str) -> pd.DataFrame:
+    return load_volume_price_lag_data(get_scope_codes(scope_name), scope_name)
+
+
+@st.cache_data(ttl=3600)
+def _get_conversion_rate(scope_name: str) -> pd.DataFrame:
+    return load_conversion_rate_data(get_scope_codes(scope_name), scope_name)
 
 
 def render() -> None:
-    """매매가 분석 페이지를 렌더링한다."""
-    st.header("매매가 분석")
+    st.header("Level 2 - 심화 비교 분석")
 
     trade_df = load_trade_summary()
     if trade_df.empty:
         st.warning("매매 집계 데이터가 없습니다.")
         return
 
-    regions = get_region_options()
+    tab1, tab2, tab3, tab4 = st.tabs(["지역 히트맵", "층수 프리미엄", "YoY 지도", "거래량-가격 선행"])
 
-    # --- 사이드바 필터 ---
-    selected_names = st.sidebar.multiselect(
-        "지역 선택",
-        options=list(regions.values()),
-        default=["강남구", "서초구", "송파구"],
-    )
-    name_to_code = {v: k for k, v in regions.items()}
-    selected_codes = [name_to_code[n] for n in selected_names if n in name_to_code]
+    with tab1:
+        metric = st.radio(
+            "히트맵 지표",
+            ["avg_price", "avg_price_per_m2", "yoy_change"],
+            horizontal=True,
+            format_func=lambda value: {"avg_price": "평균 매매가", "avg_price_per_m2": "㎡당 가격", "yoy_change": "YoY 상승률"}[value],
+        )
+        st.plotly_chart(build_district_year_heatmap(metric), width="stretch")
 
-    if not selected_codes:
-        st.info("사이드바에서 지역을 선택해주세요.")
-        return
+    with tab2:
+        region_options = sorted(trade_df["_region_name"].unique())
+        selected_regions = st.multiselect("비교 지역", options=region_options, default=region_options[:3])
+        selected_codes = tuple(trade_df[trade_df["_region_name"].isin(selected_regions)]["_lawd_cd"].astype(str).drop_duplicates().tolist())
+        selected_year = int(st.select_slider("분석 연도", options=sorted(int(value) for value in trade_df["year"].dropna().unique()), value=int(trade_df["year"].max())))
+        if selected_regions and selected_codes:
+            floor_df = _get_floor_data(selected_codes, (selected_year,))
+            st.plotly_chart(build_floor_premium_chart(floor_df, selected_regions, selected_year), width="stretch")
+        else:
+            st.info("최소 1개 지역을 선택해주세요.")
 
-    filtered = trade_df[trade_df["_lawd_cd"].isin(selected_codes)].copy()
-    filtered = filtered.sort_values("ym")
+    with tab3:
+        target_year = int(st.select_slider("지도 기준 연도", options=sorted(int(value) for value in trade_df["year"].dropna().unique()), value=int(trade_df["year"].max())))
+        yoy_df = _get_yoy_map(target_year)
+        st.caption("서울 자치구 중심점 버블맵으로 표시합니다. GeoJSON이 없더라도 대시보드가 동작하도록 구성했습니다.")
+        st.plotly_chart(build_yoy_map(yoy_df, target_year), width="stretch")
 
-    # --- 지역별 매매가 시계열 ---
-    st.subheader("지역별 평균 매매가 추이")
-    fig = px.line(
-        filtered,
-        x="date",
-        y="평균거래금액",
-        color="_region_name",
-        title="지역별 월 평균 매매가 (만원)",
-        labels={"date": "연월", "평균거래금액": "평균 매매가 (만원)", "_region_name": "지역"},
-    )
-    fig.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-    st.plotly_chart(fig, width="stretch")
+    with tab4:
+        scope_name = st.selectbox("선후행 분석 범위", ["서울 전체", "경기 전체", "수도권 전체", *sorted(trade_df["_region_name"].unique())], index=0)
+        lag_df = _get_lag_data(scope_name)
+        st.plotly_chart(build_volume_price_lag_chart(lag_df, scope_name), width="stretch")
 
-    # --- 거래량 바차트 ---
-    st.subheader("월별 거래건수")
-    fig_count = px.bar(
-        filtered,
-        x="date",
-        y="거래건수",
-        color="_region_name",
-        barmode="group",
-        title="월별 아파트 매매 거래건수",
-        labels={"date": "연월", "거래건수": "거래건수", "_region_name": "지역"},
-    )
-    fig_count.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-    st.plotly_chart(fig_count, width="stretch")
+        st.subheader("전월세 전환율")
+        conversion_df = _get_conversion_rate(scope_name)
+        st.plotly_chart(build_conversion_rate_chart(conversion_df, scope_name), width="stretch")
 
-    # --- 면적대별 가격 (있는 경우) ---
-    area_cols = [c for c in filtered.columns if c.startswith("평균거래금액_")]
-    if area_cols:
-        st.subheader("면적대별 평균 매매가")
-
-        selected_region = st.selectbox("지역 선택 (면적대별)", selected_names)
-        region_code = name_to_code.get(selected_region)
-        region_data = filtered[filtered["_lawd_cd"] == region_code].copy()
-
-        if not region_data.empty:
-            area_melted = region_data.melt(
-                id_vars=["ym", "date"],
-                value_vars=area_cols,
-                var_name="면적대",
-                value_name="면적대별평균거래금액",
-            )
-            area_melted["면적대"] = area_melted["면적대"].str.replace("평균거래금액_", "")
-
-            fig_area = px.line(
-                area_melted,
-                x="date",
-                y="면적대별평균거래금액",
-                color="면적대",
-                title=f"{selected_region} 면적대별 평균 매매가",
-                labels={"date": "연월", "면적대별평균거래금액": "평균 매매가 (만원)"},
-            )
-            fig_area.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-            st.plotly_chart(fig_area, width="stretch")
-
-    # --- YoY 상승률 ---
-    st.subheader("전년동월비(YoY) 변화율")
-
-    for name in selected_names:
-        code = name_to_code.get(name)
-        region_data = filtered[filtered["_lawd_cd"] == code].copy().sort_values("ym").reset_index(drop=True)
-
-        if len(region_data) > 12:
-            with_trend = add_trend_columns(region_data, "평균거래금액")
-            fig_yoy = px.line(
-                with_trend,
-                x="date",
-                y="평균거래금액_YoY",
-                title=f"{name} 매매가 YoY 변화율 (%)",
-                labels={"date": "연월", "평균거래금액_YoY": "YoY (%)"},
-            )
-            fig_yoy.add_hline(y=0, line_dash="dash", line_color="gray")
-            fig_yoy.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-            st.plotly_chart(fig_yoy, width="stretch")
