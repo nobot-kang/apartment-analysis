@@ -1,7 +1,7 @@
 [project]
 name = "apartment-analysis"
 version = "0.1.0"
-description = "아파트/부동산 데이터 수집 및 분석"
+description = "?꾪뙆??遺?숈궛 ?곗씠???섏쭛 諛?遺꾩꽍"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -42,5 +42,9 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.poetry]
+package-mode = false
+
 [tool.hatch.build.targets.wheel]
 packages = ["config", "pipelines", "analysis", "dashboard"]
+
