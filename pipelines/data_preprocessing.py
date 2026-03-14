@@ -199,35 +199,27 @@ class DataPreprocessor:
         return df
 
     def _save_in_chunks(self, df: pd.DataFrame, prefix: str) -> None:
-        """데이터를 5년 단위로 쪼개서 저장한다.
+        """데이터를 1년 단위로 쪼개서 저장한다.
 
-        - ~2014 (2010-2014 포함)
-        - 2015-2019
-        - 2020-2024
-        - 2025~
-        
         Args:
             df: 저장할 DataFrame (date 컬럼 필수).
             prefix: 파일명 접두사 (예: 'apt_trade', 'apt_rent').
         """
-        ranges = [
-            (None, 2014, "until_2014"),
-            (2015, 2019, "2015_2019"),
-            (2020, 2024, "2020_2024"),
-            (2025, None, "2025_after"),
-        ]
+        if df.empty:
+            return
 
-        for start_year, end_year, suffix in ranges:
-            chunk = df.copy()
-            if start_year:
-                chunk = chunk[chunk["date"].dt.year >= start_year]
-            if end_year:
-                chunk = chunk[chunk["date"].dt.year <= end_year]
+        years = df["date"].dt.year.unique()
+        for year in sorted(years):
+            if pd.isna(year):
+                continue
+            
+            year_val = int(year)
+            chunk = df[df["date"].dt.year == year_val].copy()
             
             if chunk.empty:
                 continue
                 
-            out_path = self.processed_dir / f"{prefix}_{suffix}.parquet"
+            out_path = self.processed_dir / f"{prefix}_{year_val}.parquet"
             chunk.to_parquet(out_path, index=False)
             logger.info(f"조각 저장 완료: {out_path.name} ({len(chunk)}건)")
 
@@ -235,7 +227,7 @@ class DataPreprocessor:
         """매매 데이터를 전처리한다.
 
         취소된 거래(cdealType == 'O')를 제외하고, 
-        schema에 정의된 컬럼만 추출하여 5년 단위 조각으로 저장한다.
+        schema에 정의된 컬럼만 추출하여 1년 단위 조각으로 저장한다.
         """
         logger.info("매매 데이터 전처리 시작")
         df = self._load_all_parquets("apt_trade")
@@ -279,7 +271,7 @@ class DataPreprocessor:
         return processed_df
 
     def preprocess_rent(self) -> pd.DataFrame:
-        """전월세 데이터를 전처리하여 5년 단위 조각으로 저장한다."""
+        """전월세 데이터를 전처리하여 1년 단위 조각으로 저장한다."""
         logger.info("전월세 데이터 전처리 시작")
         df = self._load_all_parquets("apt_rent")
         if df.empty:
