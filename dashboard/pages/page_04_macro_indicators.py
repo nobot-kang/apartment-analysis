@@ -1,157 +1,94 @@
-"""Page 04 – 거시지표.
-
-기준금리, CPI, M2, 금가격, 유가, 환율 등 거시경제 지표를 시각화한다.
-"""
+﻿"""Page 04 - Level 3 거시지표 연계 분석."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
 
 _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from dashboard.data_loader import load_macro_monthly, load_trade_summary
-from config.settings import SEOUL_REGIONS
+from analysis.common import get_scope_codes
+from analysis.level3 import (
+    build_correlation_heatmap,
+    build_dual_correlation_heatmaps,
+    build_fx_event_chart,
+    build_m2_price_chart,
+    build_macro_scatter,
+    build_rate_lag_chart,
+    build_real_price_chart,
+    load_combined_correlation,
+    load_fx_event_study,
+    load_real_price_index,
+)
+from dashboard.data_loader import load_trade_summary
+
+
+@st.cache_data(ttl=3600)
+def _get_combined(scope_name: str):
+    return load_combined_correlation(get_scope_codes(scope_name), scope_name)
+
+
+@st.cache_data(ttl=3600)
+def _get_real_price(scope_name: str):
+    return load_real_price_index(get_scope_codes(scope_name), scope_name)
+
+
+@st.cache_data(ttl=3600)
+def _get_fx_event():
+    return load_fx_event_study()
 
 
 def render() -> None:
-    """거시지표 페이지를 렌더링한다."""
-    st.header("거시지표")
-
-    macro_df = load_macro_monthly()
-    if macro_df.empty:
-        st.warning("거시지표 데이터가 없습니다.")
-        return
-
-    macro_df = macro_df.sort_values("date")
-
-    # --- 이중 Y축: 매매가 vs 기준금리 ---
-    st.subheader("서울 평균 매매가 vs 기준금리")
+    st.header("Level 3 - 거시지표 연계 분석")
 
     trade_df = load_trade_summary()
-    if not trade_df.empty:
-        seoul_codes = set(SEOUL_REGIONS.keys())
-        seoul_monthly = (
-            trade_df[trade_df["_lawd_cd"].isin(seoul_codes)]
-            .groupby("ym")["평균거래금액"]
-            .mean()
-            .reset_index()
-            .sort_values("ym")
-        )
-        seoul_monthly["date"] = pd.to_datetime(seoul_monthly["ym"], format="%Y%m")
+    if trade_df.empty:
+        st.warning("매매 집계 데이터가 없습니다.")
+        return
 
-        fig_dual = make_subplots(specs=[[{"secondary_y": True}]])
-        fig_dual.add_trace(
-            go.Scatter(
-                x=seoul_monthly["date"],
-                y=seoul_monthly["평균거래금액"],
-                name="서울 평균 매매가 (만원)",
-                line={"color": "royalblue"},
-            ),
-            secondary_y=False,
-        )
+    scope_options = ["서울 전체", "경기 전체", "수도권 전체", *sorted(trade_df["_region_name"].unique())]
+    scope_name = st.selectbox("분석 범위", scope_options, index=0)
+    combined = _get_combined(scope_name)
 
-        if "bok_rate" in macro_df.columns:
-            fig_dual.add_trace(
-                go.Scatter(
-                    x=macro_df["date"],
-                    y=macro_df["bok_rate"],
-                    name="한국 기준금리 (%)",
-                    line={"color": "red", "dash": "dot"},
-                ),
-                secondary_y=True,
-            )
-        if "fed_rate" in macro_df.columns:
-            fig_dual.add_trace(
-                go.Scatter(
-                    x=macro_df["date"],
-                    y=macro_df["fed_rate"],
-                    name="미국 기준금리 (%)",
-                    line={"color": "orange", "dash": "dot"},
-                ),
-                secondary_y=True,
-            )
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["금리 시차 상관", "M2 연계", "환율 이벤트", "실질 가격", "복합 상관"])
 
-        fig_dual.update_layout(title="서울 아파트 매매가 vs 기준금리")
-        fig_dual.update_yaxes(title_text="평균 매매가 (만원)", secondary_y=False)
-        fig_dual.update_yaxes(title_text="기준금리 (%)", secondary_y=True)
-        st.plotly_chart(fig_dual, width="stretch")
+    with tab1:
+        st.plotly_chart(build_rate_lag_chart(get_scope_codes(scope_name), scope_name), width="stretch")
 
-    # --- 서브플롯: 각 지표 시계열 ---
-    st.subheader("거시경제 지표 시계열")
+    with tab2:
+        st.plotly_chart(build_m2_price_chart(get_scope_codes(scope_name), scope_name), width="stretch")
 
-    indicator_labels = {
-        "bok_rate": "한국 기준금리 (%)",
-        "fed_rate": "미국 기준금리 (%)",
-        "cpi_kr": "한국 CPI",
-        "cpi_us": "미국 CPI",
-        "m2": "M2 (십억원)",
-        "gold": "금 가격 (USD/oz)",
-        "oil": "유가 WTI (USD)",
-        "usdkrw": "원달러 환율",
-    }
+    with tab3:
+        fx_df = _get_fx_event()
+        st.plotly_chart(build_fx_event_chart(fx_df), width="stretch")
 
-    available = [col for col in indicator_labels if col in macro_df.columns]
+    with tab4:
+        real_df = _get_real_price(scope_name)
+        st.plotly_chart(build_real_price_chart(real_df, scope_name), width="stretch")
 
-    if available:
-        n_cols = 3
-        n_rows = (len(available) + n_cols - 1) // n_cols
+    with tab5:
+        if combined.empty:
+            st.info("복합 상관관계 데이터가 없습니다.")
+        else:
+            st.plotly_chart(build_correlation_heatmap(combined), width="stretch")
 
-        fig_sub = make_subplots(
-            rows=n_rows,
-            cols=n_cols,
-            subplot_titles=[indicator_labels[c] for c in available],
-        )
+            compare_col1, compare_col2 = st.columns(2)
+            scope_a = compare_col1.selectbox("비교 범위 A", scope_options, index=0)
+            scope_b = compare_col2.selectbox("비교 범위 B", scope_options, index=min(1, len(scope_options) - 1))
+            combined_a = _get_combined(scope_a)
+            combined_b = _get_combined(scope_b)
+            if not combined_a.empty and not combined_b.empty:
+                st.plotly_chart(build_dual_correlation_heatmaps(combined_a, scope_a, combined_b, scope_b), width="stretch")
 
-        for idx, col in enumerate(available):
-            row = idx // n_cols + 1
-            col_pos = idx % n_cols + 1
-            fig_sub.add_trace(
-                go.Scatter(
-                    x=macro_df["date"],
-                    y=macro_df[col],
-                    name=indicator_labels[col],
-                    showlegend=False,
-                ),
-                row=row,
-                col=col_pos,
-            )
+            numeric_cols = [col for col in combined.columns if col != "date"]
+            x_col = st.selectbox("산점도 X축", numeric_cols, index=0)
+            y_candidates = [col for col in numeric_cols if col != x_col]
+            y_col = st.selectbox("산점도 Y축", y_candidates, index=0)
+            fig_scatter, reg = build_macro_scatter(combined, x_col, y_col)
+            st.plotly_chart(fig_scatter, width="stretch")
+            st.metric("R²", f"{reg['r_squared']:.4f}" if reg["r_squared"] == reg["r_squared"] else "N/A")
 
-        fig_sub.update_layout(
-            height=300 * n_rows,
-            title_text="거시경제 지표 서브플롯",
-        )
-        st.plotly_chart(fig_sub, width="stretch")
-
-    # --- 지표별 증감률 테이블 ---
-    st.subheader("지표별 전월비/전년비 증감률")
-
-    if available:
-        summary_rows = []
-        for col in available:
-            series = macro_df[col].dropna()
-            if len(series) < 2:
-                continue
-            latest = series.iloc[-1]
-            mom = ((series.iloc[-1] / series.iloc[-2]) - 1) * 100 if series.iloc[-2] != 0 else None
-            yoy = None
-            if len(series) >= 13:
-                yoy = ((series.iloc[-1] / series.iloc[-13]) - 1) * 100 if series.iloc[-13] != 0 else None
-
-            summary_rows.append({
-                "지표": indicator_labels[col],
-                "최신값": f"{latest:,.2f}",
-                "전월비 (%)": f"{mom:+.2f}" if mom is not None else "N/A",
-                "전년비 (%)": f"{yoy:+.2f}" if yoy is not None else "N/A",
-            })
-
-        if summary_rows:
-            st.dataframe(pd.DataFrame(summary_rows), width="stretch")

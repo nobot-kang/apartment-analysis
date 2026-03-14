@@ -2,8 +2,8 @@ name: Monthly Data Update
 
 on:
   schedule:
-    - cron: '0 1 1 * *'  # 매월 1일 01:00 UTC (한국 10:00)
-  workflow_dispatch:       # 수동 실행 허용
+    - cron: '0 1 1 * *'
+  workflow_dispatch:
 
 jobs:
   update:
@@ -12,21 +12,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version-file: '.python-version'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
 
       - name: Run data pipeline
         env:
           MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
           ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
-        run: python scripts/run_full_pipeline.py --mode incremental
+        run: uv run python scripts/run_full_pipeline.py --mode incremental
 
       - name: Build summary
-        run: python scripts/build_summary.py
+        run: uv run python scripts/build_summary.py
 
       - name: Commit and push processed data
         run: |

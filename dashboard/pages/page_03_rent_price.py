@@ -1,7 +1,4 @@
-"""Page 03 – 전월세 분석.
-
-전세/월세 구분, 보증금 추이, 월세 분포 등을 표시한다.
-"""
+﻿"""Page 03 - 전월세 심화 분석."""
 
 from __future__ import annotations
 
@@ -16,11 +13,28 @@ _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from dashboard.data_loader import load_rent_summary, load_trade_summary, get_region_options
+from analysis.common import aggregate_rent_scope, get_scope_codes
+from analysis.level1 import build_jeonse_ratio_chart, load_jeonse_ratio
+from analysis.level2 import build_conversion_rate_chart, load_conversion_rate_data
+from dashboard.data_loader import load_rent_summary
+
+
+@st.cache_data(ttl=3600)
+def _get_rent_scope(scope_name: str) -> pd.DataFrame:
+    return aggregate_rent_scope(load_rent_summary(), get_scope_codes(scope_name), scope_name)
+
+
+@st.cache_data(ttl=3600)
+def _get_ratio() -> pd.DataFrame:
+    return load_jeonse_ratio()
+
+
+@st.cache_data(ttl=3600)
+def _get_conversion(scope_name: str) -> pd.DataFrame:
+    return load_conversion_rate_data(get_scope_codes(scope_name), scope_name)
 
 
 def render() -> None:
-    """전월세 분석 페이지를 렌더링한다."""
     st.header("전월세 분석")
 
     rent_df = load_rent_summary()
@@ -28,137 +42,60 @@ def render() -> None:
         st.warning("전월세 집계 데이터가 없습니다.")
         return
 
-    regions = get_region_options()
+    scope_name = st.selectbox("분석 범위", ["서울 전체", "경기 전체", "수도권 전체", *sorted(rent_df["_region_name"].unique())], index=0)
+    scope_df = _get_rent_scope(scope_name)
+    ratio_df = _get_ratio()
+    conversion_df = _get_conversion(scope_name)
 
-    # --- 사이드바 필터 ---
-    selected_names = st.sidebar.multiselect(
-        "지역 선택 (전월세)",
-        options=list(regions.values()),
-        default=["강남구", "서초구", "송파구"],
-        key="rent_regions",
-    )
-    name_to_code = {v: k for k, v in regions.items()}
-    selected_codes = [name_to_code[n] for n in selected_names if n in name_to_code]
+    tab1, tab2, tab3 = st.tabs(["전세/월세 추이", "전세가율", "전월세 전환율"])
 
-    if not selected_codes:
-        st.info("사이드바에서 지역을 선택해주세요.")
-        return
-
-    filtered = rent_df[rent_df["_lawd_cd"].isin(selected_codes)].copy()
-    filtered = filtered.sort_values("ym")
-
-    # --- 전세 / 월세 탭 ---
-    tab_jeonse, tab_wolse = st.tabs(["전세", "월세"])
-
-    has_rent_type = "rentType" in filtered.columns
-
-    with tab_jeonse:
-        st.subheader("전세 보증금 추이")
-        if has_rent_type:
-            jeonse = filtered[filtered["rentType"].str.strip() == "전세"]
+    with tab1:
+        if scope_df.empty:
+            st.info("선택 범위의 전월세 데이터가 없습니다.")
         else:
-            jeonse = filtered
-
-        if not jeonse.empty and "평균보증금" in jeonse.columns:
-            fig = px.line(
-                jeonse,
+            fig_deposit = px.line(
+                scope_df,
                 x="date",
                 y="평균보증금",
-                color="_region_name",
-                title="전세 평균 보증금 추이 (만원)",
-                labels={"date": "연월", "평균보증금": "평균 보증금 (만원)", "_region_name": "지역"},
+                color="rentType",
+                title=f"{scope_name} 평균 보증금 추이",
+                labels={"date": "월", "평균보증금": "평균 보증금 (만원)", "rentType": "유형"},
             )
-            fig.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig_deposit, width="stretch")
 
-            # 전세가율 (매매가 대비)
-            trade_df = load_trade_summary()
-            if not trade_df.empty:
-                st.subheader("전세가율 (전세보증금 / 매매가)")
-                trade_avg = (
-                    trade_df.groupby(["ym", "date", "_lawd_cd"])["평균거래금액"]
-                    .mean()
-                    .reset_index()
-                )
-                jeonse_avg = (
-                    jeonse.groupby(["ym", "date", "_lawd_cd"])["평균보증금"]
-                    .mean()
-                    .reset_index()
-                )
-
-                merged = jeonse_avg.merge(trade_avg, on=["ym", "date", "_lawd_cd"], how="inner")
-                merged["전세가율"] = (merged["평균보증금"] / merged["평균거래금액"]) * 100
-                merged = merged.merge(
-                    rent_df[["_lawd_cd", "_region_name"]].drop_duplicates(),
-                    on="_lawd_cd",
-                    how="left",
-                )
-
-                fig_ratio = px.line(
-                    merged,
-                    x="date",
-                    y="전세가율",
-                    color="_region_name",
-                    title="전세가율 추이 (%)",
-                    labels={"date": "연월", "전세가율": "전세가율 (%)", "_region_name": "지역"},
-                )
-                fig_ratio.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-                st.plotly_chart(fig_ratio, width="stretch")
-        else:
-            st.info("전세 데이터가 없습니다.")
-
-    with tab_wolse:
-        st.subheader("월세 추이")
-        if has_rent_type:
-            wolse = filtered[filtered["rentType"].str.strip() == "월세"]
-        else:
-            wolse = pd.DataFrame()
-
-        if not wolse.empty and "평균월세" in wolse.columns:
-            fig_wolse = px.line(
-                wolse,
+            fig_count = px.bar(
+                scope_df,
                 x="date",
-                y="평균월세",
-                color="_region_name",
-                title="월세 평균 월세금액 추이 (만원)",
-                labels={"date": "연월", "평균월세": "평균 월세 (만원)", "_region_name": "지역"},
+                y="거래건수",
+                color="rentType",
+                barmode="group",
+                title=f"{scope_name} 전세/월세 거래건수",
+                labels={"date": "월", "거래건수": "거래건수", "rentType": "유형"},
             )
-            fig_wolse.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-            st.plotly_chart(fig_wolse, width="stretch")
+            st.plotly_chart(fig_count, width="stretch")
 
-            # 보증금 × 월세 산점도
-            if "평균보증금" in wolse.columns:
-                st.subheader("보증금 × 월세 분포")
+            wolse = scope_df[scope_df["rentType"] == "월세"]
+            if not wolse.empty:
                 fig_scatter = px.scatter(
                     wolse,
                     x="평균보증금",
                     y="평균월세",
-                    color="_region_name",
-                    title="보증금 vs 월세",
-                    labels={"평균보증금": "평균 보증금 (만원)", "평균월세": "평균 월세 (만원)", "_region_name": "지역"},
+                    size="거래건수",
+                    title=f"{scope_name} 보증금-월세 분포",
+                    labels={"평균보증금": "평균 보증금 (만원)", "평균월세": "평균 월세 (만원)"},
                 )
                 st.plotly_chart(fig_scatter, width="stretch")
-        else:
-            st.info("월세 데이터가 없습니다.")
 
-    # --- 거래건수 비교 ---
-    st.subheader("전월세 거래건수 추이")
-    if has_rent_type:
-        count_by_type = (
-            filtered.groupby(["ym", "date", "rentType"])["거래건수"]
-            .sum()
-            .reset_index()
-        )
-        fig_type = px.bar(
-            count_by_type,
-            x="date",
-            y="거래건수",
-            color="rentType",
-            barmode="group",
-            text="거래건수",
-            title="전세/월세 거래건수 추이",
-            labels={"date": "연월", "거래건수": "거래건수", "rentType": "유형"},
-        )
-        fig_type.update_traces(textposition="outside")
-        fig_type.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-        st.plotly_chart(fig_type, width="stretch")
+    with tab2:
+        available_regions = sorted(ratio_df["_region_name"].unique()) if not ratio_df.empty else []
+        default_index = available_regions.index(scope_name) if scope_name in available_regions else 0
+        region_name = st.selectbox("전세가율 지역", available_regions, index=default_index) if available_regions else None
+        if region_name:
+            st.plotly_chart(build_jeonse_ratio_chart(ratio_df, region_name), width="stretch")
+
+    with tab3:
+        st.plotly_chart(build_conversion_rate_chart(conversion_df, scope_name), width="stretch")
+        if not conversion_df.empty:
+            latest = conversion_df.sort_values("date").iloc[-1]
+            st.metric("최근 전환율", f"{latest['conversion_rate']:.2f}%", help="월세를 연환산하여 전세보증금 차이로 나눈 값입니다.")
+

@@ -1,122 +1,120 @@
-"""Page 01 – 종합 현황.
-
-KPI 카드, 서울 전체 평균 매매가 추이, 자치구별 히트맵 등을 표시한다.
-"""
+﻿"""Page 01 - Level 1 기초 현황."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-import plotly.express as px
-import plotly.graph_objects as go
+import pandas as pd
 import streamlit as st
 
 _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from config.settings import SEOUL_REGIONS
-from dashboard.data_loader import load_trade_summary, load_macro_monthly
+from analysis.common import get_scope_codes
+from analysis.level1 import (
+    build_age_premium_chart,
+    build_area_boxplot,
+    build_jeonse_ratio_chart,
+    build_monthly_volume_chart,
+    build_ranking_animation,
+    build_ranking_chart,
+    load_age_premium,
+    load_area_distribution,
+    load_district_ranking,
+    load_jeonse_ratio,
+    load_monthly_volume,
+)
+from dashboard.data_loader import load_macro_monthly, load_rent_summary, load_trade_summary
+
+
+@st.cache_data(ttl=3600)
+def _get_monthly_volume(scope_name: str) -> pd.DataFrame:
+    return load_monthly_volume(get_scope_codes(scope_name), scope_name)
+
+
+@st.cache_data(ttl=3600)
+def _get_ranking(year: int) -> pd.DataFrame:
+    return load_district_ranking(year)
+
+
+@st.cache_data(ttl=3600)
+def _get_area_distribution(region_code: str, years: tuple[int, ...]) -> pd.DataFrame:
+    return load_area_distribution([region_code], list(years))
+
+
+@st.cache_data(ttl=3600)
+def _get_age_premium(region_code: str, years: tuple[int, ...]) -> pd.DataFrame:
+    return load_age_premium([region_code], list(years))
+
+
+@st.cache_data(ttl=3600)
+def _get_jeonse_ratio() -> pd.DataFrame:
+    return load_jeonse_ratio()
 
 
 def render() -> None:
-    """종합 현황 페이지를 렌더링한다."""
-    st.header("종합 현황")
+    st.header("Level 1 - 기초 현황")
 
     trade_df = load_trade_summary()
+    rent_df = load_rent_summary()
     macro_df = load_macro_monthly()
-
     if trade_df.empty:
-        st.warning("매매 집계 데이터가 없습니다. 먼저 파이프라인을 실행해주세요.")
+        st.warning("매매 집계 데이터가 없습니다. 집계 파이프라인을 먼저 실행해주세요.")
         return
 
-    # --- KPI 카드 ---
-    seoul_codes = set(SEOUL_REGIONS.keys())
-    seoul_df = trade_df[trade_df["_lawd_cd"].isin(seoul_codes)].copy()
+    latest_ym = trade_df["ym"].max()
+    latest_trade = trade_df[trade_df["ym"] == latest_ym]
+    latest_rent = rent_df[(rent_df["ym"] == latest_ym) & (rent_df["rentType"] == "전세")]
+    latest_ratio = (latest_rent["평균보증금"].mean() / latest_trade["평균거래금액"].mean() * 100) if not latest_rent.empty else float("nan")
+    latest_rate = macro_df["bok_rate"].dropna().iloc[-1] if not macro_df.empty and "bok_rate" in macro_df.columns and not macro_df["bok_rate"].dropna().empty else float("nan")
 
-    if not seoul_df.empty:
-        latest_ym = seoul_df["ym"].max()
-        prev_ym_candidates = seoul_df[seoul_df["ym"] < latest_ym]["ym"]
-        prev_ym = prev_ym_candidates.max() if not prev_ym_candidates.empty else None
-        latest_ym_label = f"{latest_ym[:4]}-{latest_ym[4:]}" if isinstance(latest_ym, str) and len(latest_ym) == 6 else latest_ym
+    cols = st.columns(4)
+    cols[0].metric("최근 평균 매매가", f"{latest_trade['평균거래금액'].mean():,.0f} 만원")
+    cols[1].metric("최근 거래건수", f"{int(latest_trade['거래건수'].sum()):,} 건")
+    cols[2].metric("평균 전세가율", f"{latest_ratio:.1f}%" if latest_ratio == latest_ratio else "N/A")
+    cols[3].metric("한국 기준금리", f"{latest_rate:.2f}%" if latest_rate == latest_rate else "N/A")
 
-        latest = seoul_df[seoul_df["ym"] == latest_ym]
-        avg_price = latest["평균거래금액"].mean()
-        total_count = latest["거래건수"].sum()
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["거래량 추이", "지역 랭킹", "면적 분포", "건축 연령", "전세가율"])
 
-        cols = st.columns(4)
-        cols[0].metric(
-            "서울 평균 매매가 (만원)",
-            f"{avg_price:,.0f}" if avg_price == avg_price else "N/A",
-        )
-        cols[1].metric("서울 거래건수", f"{total_count:,}")
-        cols[2].metric("기준 연월", latest_ym_label)
+    with tab1:
+        scope_name = st.selectbox("분석 범위", ["서울 전체", "경기 전체", "수도권 전체", *list(dict.fromkeys(trade_df["_region_name"].tolist()))], index=0)
+        volume_df = _get_monthly_volume(scope_name)
+        st.plotly_chart(build_monthly_volume_chart(volume_df, scope_name), width="stretch")
 
-        if not macro_df.empty and "bok_rate" in macro_df.columns:
-            latest_rate = macro_df["bok_rate"].dropna().iloc[-1] if not macro_df["bok_rate"].dropna().empty else None
-            cols[3].metric("한국 기준금리", f"{latest_rate}%" if latest_rate is not None else "N/A")
+    with tab2:
+        years = sorted(trade_df["year"].dropna().unique())
+        selected_year = st.select_slider("랭킹 기준 연도", options=years, value=years[-1])
+        metric = st.radio("랭킹 지표", ["avg_price", "avg_price_per_m2"], horizontal=True, format_func=lambda x: "평균 매매가" if x == "avg_price" else "평균 ㎡당 가격")
+        ranking_df = _get_ranking(int(selected_year))
+        st.plotly_chart(build_ranking_chart(ranking_df, int(selected_year), metric), width="stretch")
+        with st.expander("연도별 랭킹 애니메이션", expanded=False):
+            st.plotly_chart(build_ranking_animation(metric), width="stretch")
+
+    with tab3:
+        region_name = st.selectbox("면적 분포 지역", options=sorted(trade_df["_region_name"].unique()), index=0)
+        region_code = trade_df.loc[trade_df["_region_name"] == region_name, "_lawd_cd"].iloc[0]
+        year_choices = sorted(int(value) for value in trade_df["year"].dropna().unique())
+        selected_years = st.multiselect("포함 연도", options=year_choices, default=year_choices[-4:])
+        area_bin = st.radio("면적 구간", ["60㎡ 이하", "60~85㎡", "85㎡ 초과"], horizontal=True)
+        if selected_years:
+            area_df = _get_area_distribution(str(region_code), tuple(selected_years))
+            st.plotly_chart(build_area_boxplot(area_df, area_bin, region_name), width="stretch")
         else:
-            cols[3].metric("한국 기준금리", "N/A")
+            st.info("최소 1개 연도를 선택해주세요.")
 
-    # --- 서울 전체 월별 평균 매매가 추이 ---
-    st.subheader("서울 전체 월별 평균 매매가 추이")
+    with tab4:
+        region_name = st.selectbox("건축 연령 분석 지역", options=sorted(trade_df["_region_name"].unique()), index=min(1, len(trade_df["_region_name"].unique()) - 1))
+        region_code = trade_df.loc[trade_df["_region_name"] == region_name, "_lawd_cd"].iloc[0]
+        year_choices = sorted(int(value) for value in trade_df["year"].dropna().unique())
+        selected_year = st.select_slider("건축 연령 기준 연도", options=year_choices, value=year_choices[-1])
+        age_df = _get_age_premium(str(region_code), (int(selected_year),))
+        st.plotly_chart(build_age_premium_chart(age_df, region_name, int(selected_year)), width="stretch")
 
-    if not seoul_df.empty:
-        monthly_avg = (
-            seoul_df.groupby(["ym", "date"])["평균거래금액"]
-            .mean()
-            .reset_index()
-            .sort_values("date")
-        )
-        fig = px.line(
-            monthly_avg,
-            x="date",
-            y="평균거래금액",
-            title="서울 월별 평균 아파트 매매가 (만원)",
-            labels={"date": "연월", "평균거래금액": "평균 매매가 (만원)"},
-        )
-        fig.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-        st.plotly_chart(fig, width="stretch")
+    with tab5:
+        ratio_df = _get_jeonse_ratio()
+        region_name = st.selectbox("전세가율 지역", options=sorted(ratio_df["_region_name"].unique()) if not ratio_df.empty else [], index=0)
+        if region_name:
+            st.plotly_chart(build_jeonse_ratio_chart(ratio_df, region_name), width="stretch")
 
-    # --- 자치구별 × 연도별 히트맵 ---
-    st.subheader("자치구별 × 연도별 평균 거래금액 히트맵")
-
-    if not seoul_df.empty:
-        seoul_df["year"] = seoul_df["ym"].str[:4]
-        heatmap_data = seoul_df.pivot_table(
-            index="_region_name",
-            columns="year",
-            values="평균거래금액",
-            aggfunc="mean",
-        )
-        fig_heat = px.imshow(
-            heatmap_data.values,
-            x=heatmap_data.columns.tolist(),
-            y=heatmap_data.index.tolist(),
-            color_continuous_scale="RdYlGn_r",
-            labels={"color": "평균 매매가 (만원)"},
-            title="자치구별 × 연도별 평균 거래금액",
-            aspect="auto",
-        )
-        st.plotly_chart(fig_heat, width="stretch")
-
-    # --- 거래건수 추이 ---
-    st.subheader("서울 월별 총 거래건수")
-
-    if not seoul_df.empty:
-        monthly_count = (
-            seoul_df.groupby(["ym", "date"])["거래건수"]
-            .sum()
-            .reset_index()
-            .sort_values("date")
-        )
-        fig_count = px.bar(
-            monthly_count,
-            x="date",
-            y="거래건수",
-            title="서울 월별 아파트 매매 거래건수",
-            labels={"date": "연월", "거래건수": "거래건수"},
-        )
-        fig_count.update_xaxes(tickformat="%Y-%m", dtick="M3", tickangle=-45)
-        st.plotly_chart(fig_count, width="stretch")
