@@ -1,4 +1,4 @@
-﻿"""Level 4 고급 분석."""
+"""Level 4 고급 분석."""
 
 from __future__ import annotations
 
@@ -13,16 +13,7 @@ import statsmodels.formula.api as smf
 from plotly.subplots import make_subplots
 from scipy.cluster.hierarchy import fcluster, linkage
 
-from analysis.common import (
-    ANALYSIS_START_YM,
-    SEOUL_DISTRICT_COORDS,
-    add_seoul_coordinates,
-    aggregate_trade_scope,
-    load_macro_monthly_df,
-    load_trade_detail_df,
-    load_trade_summary_df,
-    optional_import,
-)
+from analysis.common import SEOUL_DISTRICT_COORDS, add_seoul_coordinates, aggregate_trade_scope, optional_import
 
 DID_EVENTS = {
     "GTX-A 착공 발표": {
@@ -47,7 +38,7 @@ PHASE_COLORS = {
 
 
 def _add_datetime_event_marker(fig: go.Figure, event_date: pd.Timestamp, label: str) -> None:
-    """Plotly의 datetime 축 add_vline 주석 버그를 우회해 이벤트 마커를 추가한다."""
+    """Plotly datetime 축의 add_vline 주석 버그를 우회해 이벤트 마커를 추가한다."""
     fig.add_vline(x=event_date, line_dash="dash", line_color="gray")
     fig.add_annotation(
         x=event_date,
@@ -63,21 +54,25 @@ def _add_datetime_event_marker(fig: go.Figure, event_date: pd.Timestamp, label: 
     )
 
 
-def _build_scope_frame(region_codes: list[str] | None = None, scope_name: str | None = None) -> pd.DataFrame:
-    trade_scope = aggregate_trade_scope(load_trade_summary_df(ANALYSIS_START_YM), region_codes, scope_name)
-    macro = load_macro_monthly_df(ANALYSIS_START_YM)
-    if trade_scope.empty or macro.empty:
+def build_scope_frame(
+    trade_summary_df: pd.DataFrame,
+    macro_df: pd.DataFrame,
+    region_codes: list[str] | None = None,
+    scope_name: str | None = None,
+) -> pd.DataFrame:
+    """매매 집계와 거시지표를 하나의 scope 시계열로 결합한다."""
+    trade_scope = aggregate_trade_scope(trade_summary_df, region_codes, scope_name)
+    if trade_scope.empty or macro_df.empty:
         return pd.DataFrame()
-    return trade_scope.merge(macro, on=["ym", "date"], how="inner").sort_values("date").reset_index(drop=True)
+    return trade_scope.merge(macro_df, on=["ym", "date"], how="inner").sort_values("date").reset_index(drop=True)
 
 
-def build_prediction_dataset(region_codes: list[str] | None = None, scope_name: str | None = None) -> pd.DataFrame:
+def build_prediction_dataset(scope_frame: pd.DataFrame) -> pd.DataFrame:
     """다음 달 평균 매매가 예측용 데이터셋을 생성한다."""
-    df = _build_scope_frame(region_codes, scope_name)
-    if df.empty:
-        return df
+    if scope_frame.empty:
+        return scope_frame.copy()
 
-    result = df.copy()
+    result = scope_frame.copy()
     result["target"] = result["평균거래금액"].shift(-1)
     for lag in [1, 3, 6, 12]:
         result[f"price_lag_{lag}"] = result["평균거래금액"].shift(lag)
@@ -123,7 +118,8 @@ def run_prediction_model(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, floa
     model = sm.OLS(np.log(train["target"]), x_train).fit()
     test["predicted"] = np.exp(model.predict(x_test))
     test["actual"] = test["target"]
-    test["scope_name"] = df.get("scope_name", pd.Series(["선택 지역"] * len(df))).iloc[0]
+    scope_name = str(df.get("scope_name", pd.Series(["선택 지역"] * len(df))).iloc[0])
+    test["scope_name"] = scope_name
 
     rmse = float(np.sqrt(np.mean((test["actual"] - test["predicted"]) ** 2)))
     mape = float(np.mean(np.abs((test["actual"] - test["predicted"]) / test["actual"])) * 100)
@@ -155,31 +151,33 @@ def _dtw_distance(series_a: np.ndarray, series_b: np.ndarray) -> float:
     return float(cost[n_rows, n_cols])
 
 
-def load_cluster_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_cluster_dataset(trade_summary_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """서울 자치구 가격 시계열 행렬을 준비한다."""
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    if trade.empty:
-        return pd.DataFrame(), pd.DataFrame()
+    if trade_summary_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    seoul = trade[trade["_lawd_cd"].astype(str).str.startswith("11")].copy()
+    seoul = trade_summary_df[trade_summary_df["_lawd_cd"].astype(str).isin(SEOUL_DISTRICT_COORDS.keys())].copy()
+    if seoul.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
     pivot = seoul.pivot_table(index="date", columns="_region_name", values="평균거래금액", aggfunc="mean").sort_index()
     pivot = pivot.interpolate(limit_direction="both").ffill().bfill()
     scaled = (pivot - pivot.mean()) / pivot.std(ddof=0).replace(0, np.nan)
     scaled = scaled.fillna(0)
-    return pivot, scaled
+    lookup = seoul[["_lawd_cd", "_region_name"]].drop_duplicates().rename(columns={"_region_name": "district"}).reset_index(drop=True)
+    return pivot, scaled, lookup
 
 
-def run_dtw_clustering(n_clusters: int = 4) -> pd.DataFrame:
+def run_dtw_clustering(scaled: pd.DataFrame, region_lookup: pd.DataFrame, n_clusters: int = 4) -> pd.DataFrame:
     """서울 자치구를 DTW 거리로 군집화한다."""
-    _, scaled = load_cluster_dataset()
-    if scaled.empty:
+    if scaled.empty or region_lookup.empty:
         return pd.DataFrame(columns=["district", "cluster", "cluster_name", "lat", "lon"])
 
     districts = list(scaled.columns)
     if len(districts) == 1:
         cluster_df = pd.DataFrame({"district": districts, "cluster": [1]})
     else:
-        condensed = []
+        condensed: list[float] = []
         for i in range(len(districts)):
             for j in range(i + 1, len(districts)):
                 condensed.append(_dtw_distance(scaled.iloc[:, i].to_numpy(), scaled.iloc[:, j].to_numpy()))
@@ -188,21 +186,17 @@ def run_dtw_clustering(n_clusters: int = 4) -> pd.DataFrame:
         cluster_df = pd.DataFrame({"district": districts, "cluster": labels})
 
     cluster_df["cluster_name"] = cluster_df["cluster"].map(lambda value: f"Cluster {value}")
-    reverse_map = {
-        name: code
-        for code, name in load_trade_summary_df(ANALYSIS_START_YM)[["_lawd_cd", "_region_name"]].drop_duplicates().values
-    }
-    cluster_df["_lawd_cd"] = cluster_df["district"].map(reverse_map)
-    cluster_df = add_seoul_coordinates(cluster_df)
+    cluster_df = cluster_df.merge(region_lookup, on="district", how="left")
+    cluster_df = add_seoul_coordinates(cluster_df, code_col="_lawd_cd")
     return cluster_df.reset_index(drop=True)
 
 
-def build_cluster_heatmap() -> go.Figure:
+def build_cluster_heatmap(scaled: pd.DataFrame, cluster_df: pd.DataFrame) -> go.Figure:
     """군집화 전 표준화된 가격 패턴 히트맵을 그린다."""
-    _, scaled = load_cluster_dataset()
-    cluster_df = run_dtw_clustering()
     if scaled.empty or cluster_df.empty:
-        return go.Figure()
+        fig = go.Figure()
+        fig.update_layout(title="군집 분석 데이터 없음")
+        return fig
 
     ordered = cluster_df.sort_values(["cluster", "district"])["district"].tolist()
     matrix = scaled[ordered].T
@@ -214,7 +208,9 @@ def build_cluster_heatmap() -> go.Figure:
 def build_cluster_map(cluster_df: pd.DataFrame) -> go.Figure:
     """군집 결과를 서울 지도 위에 표시한다."""
     if cluster_df.empty:
-        return go.Figure()
+        fig = go.Figure()
+        fig.update_layout(title="군집 지도 데이터 없음")
+        return fig
 
     fig = px.scatter_mapbox(
         cluster_df,
@@ -231,56 +227,15 @@ def build_cluster_map(cluster_df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def load_anomaly_data(region_code: str, years: list[int] | None = None) -> pd.DataFrame:
-    """이상거래 탐지용 상세 데이터를 불러온다."""
-    df = load_trade_detail_df(
-        years=years,
-        region_codes=[region_code],
-        columns=["date", "price", "area", "floor", "age", "apt_name_repr", "dong_repr"],
-    )
-    if df.empty:
-        return df
-
-    result = df.copy()
-    result["price_per_m2"] = result["price"] / result["area"].replace(0, pd.NA)
-    return result.dropna(subset=["price_per_m2", "area", "floor"])
-
-
-def detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
-    """설치 환경에 따라 IsolationForest 또는 강건 z-score를 사용한다."""
-    if df.empty:
-        return df.copy()
-
-    result = df.copy()
-    sklearn_ensemble = optional_import("sklearn.ensemble")
-    feature_frame = result[["price_per_m2", "area", "floor", "age"]]
-    features = feature_frame.fillna(feature_frame.median())
-
-    if sklearn_ensemble is not None:
-        model = sklearn_ensemble.IsolationForest(n_estimators=200, contamination=0.03, random_state=42)
-        model.fit(features)
-        result["anomaly_score"] = model.score_samples(features)
-        result["is_anomaly"] = model.predict(features) == -1
-        return result
-
-    medians = features.median()
-    mads = (features - medians).abs().median().replace(0, np.nan)
-    robust_z = ((features - medians).abs() / mads).fillna(0)
-    result["anomaly_score"] = robust_z.mean(axis=1)
-    threshold = result["anomaly_score"].quantile(0.97)
-    result["is_anomaly"] = result["anomaly_score"] >= threshold
-    return result
-
-
 def build_anomaly_chart(df: pd.DataFrame, scope_name: str) -> go.Figure:
-    """이상거래를 시계열 산점도로 표시한다."""
+    """선계산된 이상거래를 시계열 산점도로 표시한다."""
     fig = go.Figure()
     if df.empty:
         fig.update_layout(title="이상거래 데이터 없음", height=480)
         return fig
 
-    normal = df[~df["is_anomaly"]]
-    anomaly = df[df["is_anomaly"]]
+    normal = df[~df["is_anomaly"]].copy()
+    anomaly = df[df["is_anomaly"]].copy()
     fig.add_trace(go.Scatter(x=normal["date"], y=normal["price_per_m2"], mode="markers", name="정상", marker={"size": 5, "color": "#A8DADC", "opacity": 0.5}))
     fig.add_trace(
         go.Scatter(
@@ -289,7 +244,7 @@ def build_anomaly_chart(df: pd.DataFrame, scope_name: str) -> go.Figure:
             mode="markers",
             name="이상",
             marker={"size": 9, "color": "#D1495B", "symbol": "x"},
-            text=anomaly["apt_name_repr"],
+            text=anomaly.get("apt_name_repr", pd.Series(dtype="string")),
             hovertemplate="%{text}<br>㎡당 %{y:,.0f}만원<extra></extra>",
         )
     )
@@ -297,27 +252,25 @@ def build_anomaly_chart(df: pd.DataFrame, scope_name: str) -> go.Figure:
     return fig
 
 
-def build_did_dataset(event_key: str) -> pd.DataFrame:
+def build_did_dataset(trade_summary_df: pd.DataFrame, macro_df: pd.DataFrame, event_key: str) -> pd.DataFrame:
     """GTX 이벤트별 Difference-in-Differences 데이터셋을 만든다."""
     event = DID_EVENTS[event_key]
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    macro = load_macro_monthly_df(ANALYSIS_START_YM)
-    if trade.empty or macro.empty:
+    if trade_summary_df.empty or macro_df.empty:
         return pd.DataFrame()
 
     all_regions = event["treatment_regions"] + event["control_regions"]
-    subset = trade[trade["_region_name"].isin(all_regions)].copy()
+    subset = trade_summary_df[trade_summary_df["_region_name"].isin(all_regions)].copy()
     if subset.empty:
         return pd.DataFrame()
 
-    subset = subset.merge(macro[["ym", "bok_rate"]], on="ym", how="left")
+    subset = subset.merge(macro_df[["ym", "bok_rate"]], on="ym", how="left")
     subset["treatment"] = subset["_region_name"].isin(event["treatment_regions"]).astype(int)
     subset["post"] = (subset["ym"] >= event["event_ym"]).astype(int)
     subset["log_price"] = np.log(subset["평균거래금액"])
 
     months = sorted(subset["ym"].unique())
     event_index = months.index(event["event_ym"]) if event["event_ym"] in months else len(months) // 2
-    window = months[max(0, event_index - 12) : min(len(months), event_index + 13)]
+    window = months[max(0, event_index - 12): min(len(months), event_index + 13)]
     return subset[subset["ym"].isin(window)].copy()
 
 
@@ -358,7 +311,7 @@ def build_parallel_trend_chart(df: pd.DataFrame, event_ym: str) -> go.Figure:
 
     mapping = {1: ("처리군", "#D1495B"), 0: ("대조군", "#457B9D")}
     for treatment, (label, color) in mapping.items():
-        subset = trend[trend["treatment"] == treatment]
+        subset = trend[trend["treatment"] == treatment].copy()
         fig.add_trace(
             go.Scatter(
                 x=subset["date"],
@@ -372,33 +325,6 @@ def build_parallel_trend_chart(df: pd.DataFrame, event_ym: str) -> go.Figure:
     _add_datetime_event_marker(fig, pd.Timestamp(f"{event_ym[:4]}-{event_ym[4:]}-01"), "이벤트")
     fig.update_layout(title="처리군 vs 대조군 평행 추세", yaxis_title="평균 매매가 (만원)", height=430, hovermode="x unified")
     return fig
-
-
-def load_cycle_features() -> pd.DataFrame:
-    """시장 사이클 분류용 특징량을 생성한다."""
-    seoul_codes = list(SEOUL_DISTRICT_COORDS.keys())
-    df = _build_scope_frame(seoul_codes, "서울 전체")
-    if df.empty:
-        return df
-
-    result = df.copy()
-    result["rate_direction"] = np.sign(result["bok_rate"].diff()) if "bok_rate" in result.columns else 0
-    result["m2_yoy"] = result["m2"].pct_change(12) * 100 if "m2" in result.columns else np.nan
-    result["vol_mom"] = result["거래건수"].pct_change() * 100
-    result["vol_mom_3ma"] = result["vol_mom"].rolling(3).mean()
-    result["price_yoy"] = result["평균거래금액"].pct_change(12) * 100
-
-    def classify(row: pd.Series) -> str:
-        if row.get("rate_direction", 0) <= 0 and row.get("m2_yoy", 0) >= 5 and row.get("vol_mom_3ma", 0) >= 0:
-            return "과열"
-        if row.get("rate_direction", 0) >= 1 and row.get("m2_yoy", 0) <= 2 and row.get("vol_mom_3ma", 0) <= -5:
-            return "침체"
-        if row.get("rate_direction", 0) >= 1 and row.get("vol_mom_3ma", 0) <= 0:
-            return "조정"
-        return "회복"
-
-    result["phase_rule"] = result.apply(classify, axis=1)
-    return result.dropna(subset=["price_yoy", "m2_yoy", "vol_mom_3ma"]).reset_index(drop=True)
 
 
 def build_cycle_dashboard(df: pd.DataFrame, use_hmm: bool = False) -> go.Figure:
