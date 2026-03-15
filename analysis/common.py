@@ -1,4 +1,4 @@
-﻿"""분석 전반에서 재사용하는 공통 로더와 집계 유틸리티."""
+"""분석 전반에서 재사용하는 공통 로더와 집계 유틸리티."""
 
 from __future__ import annotations
 
@@ -79,6 +79,11 @@ DASHBOARD_RENT_SUMMARY_PATH = PROCESSED_DIR / "dashboard_rent_summary.parquet"
 DASHBOARD_MACRO_MONTHLY_PATH = PROCESSED_DIR / "dashboard_macro_monthly.parquet"
 DASHBOARD_TRADE_DETAIL_PATH = PROCESSED_DIR / "dashboard_trade_detail.parquet"
 DASHBOARD_RENT_DETAIL_PATH = PROCESSED_DIR / "dashboard_rent_detail.parquet"
+DASHBOARD_JEONSE_RATIO_PATH = PROCESSED_DIR / "dashboard_jeonse_ratio_monthly.parquet"
+DASHBOARD_CONVERSION_RATE_PATH = PROCESSED_DIR / "dashboard_conversion_rate_monthly.parquet"
+DASHBOARD_DISTRICT_YEAR_METRICS_PATH = PROCESSED_DIR / "dashboard_district_year_metrics.parquet"
+DASHBOARD_CYCLE_FEATURES_PATH = PROCESSED_DIR / "dashboard_cycle_features.parquet"
+DASHBOARD_TRADE_ANOMALIES_PATH = PROCESSED_DIR / "dashboard_trade_anomalies.parquet"
 
 
 def optional_import(module_name: str):
@@ -116,10 +121,7 @@ def _normalize_ym_text(value: str | int | None) -> str | None:
     )
 
 
-def _read_parquet_optional_columns(
-    path,
-    columns: Sequence[str] | None = None,
-) -> pd.DataFrame:
+def _read_parquet_optional_columns(path, columns: Sequence[str] | None = None) -> pd.DataFrame:
     """필요 컬럼만 읽되 실패하면 전체 로드 후 교집합만 남긴다."""
     if columns is None:
         return pd.read_parquet(path)
@@ -133,6 +135,26 @@ def _read_parquet_optional_columns(
         if not available:
             return pd.DataFrame()
         return df[available].copy()
+
+
+def _ensure_ym_column(df: pd.DataFrame, ym_column: str = "ym") -> pd.DataFrame:
+    """연월 문자열 컬럼을 보강한다."""
+    if df.empty:
+        return df.copy()
+
+    result = df.copy()
+    if ym_column in result.columns:
+        result[ym_column] = (
+            result[ym_column]
+            .astype("string")
+            .str.replace(r"\.0$", "", regex=True)
+            .str.replace(r"\D", "", regex=True)
+            .str.zfill(6)
+        )
+    elif "date" in result.columns:
+        result["date"] = pd.to_datetime(result["date"], errors="coerce")
+        result[ym_column] = result["date"].dt.strftime("%Y%m")
+    return result
 
 
 def _should_use_dashboard_monthly_path(start_ym: str | None, dashboard_path) -> bool:
@@ -207,15 +229,8 @@ def ensure_month_columns(df: pd.DataFrame, ym_column: str = "ym") -> pd.DataFram
     if df.empty:
         return df.copy()
 
-    result = df.copy()
+    result = _ensure_ym_column(df, ym_column=ym_column)
     if ym_column in result.columns:
-        result[ym_column] = (
-            result[ym_column]
-            .astype("string")
-            .str.replace(r"\.0$", "", regex=True)
-            .str.replace(r"\D", "", regex=True)
-            .str.zfill(6)
-        )
         result["date"] = pd.to_datetime(result[ym_column], format="%Y%m", errors="coerce")
     elif "date" in result.columns:
         result["date"] = pd.to_datetime(result["date"], errors="coerce")
@@ -225,6 +240,23 @@ def ensure_month_columns(df: pd.DataFrame, ym_column: str = "ym") -> pd.DataFram
         result["year"] = result["date"].dt.year
         result["month"] = result["date"].dt.month
     return result
+
+
+def _read_dashboard_table(path, start_ym: str | None = ANALYSIS_START_YM, ym_column: str = "ym") -> pd.DataFrame:
+    """대시보드용 선계산 parquet를 읽고 기간 필터를 적용한다."""
+    if not path.exists():
+        return pd.DataFrame()
+
+    df = pd.read_parquet(path)
+    if df.empty:
+        return df
+
+    if ym_column in df.columns or "date" in df.columns:
+        df = ensure_month_columns(df, ym_column=ym_column)
+    normalized_start = _normalize_ym_text(start_ym)
+    if normalized_start and ym_column in df.columns:
+        df = df[df[ym_column] >= normalized_start].copy()
+    return df.reset_index(drop=True)
 
 
 def get_region_code(region_name: str) -> str | None:
@@ -251,6 +283,11 @@ def get_scope_codes(scope_name: str) -> list[str]:
 
     region_code = get_region_code(scope_name)
     return [region_code] if region_code else []
+
+
+def get_scope_options() -> list[str]:
+    """대시보드에서 사용하는 기본 scope 옵션을 반환한다."""
+    return ["서울 전체", "경기 전체", "수도권 전체", *sorted(ALL_REGIONS.values())]
 
 
 def infer_scope_name(region_codes: Sequence[str] | None) -> str:
@@ -373,11 +410,75 @@ def load_macro_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFr
     if not path.exists():
         return pd.DataFrame()
 
-    df = pd.read_parquet(path)
-    df = ensure_month_columns(df, ym_column="ym")
+    df = ensure_month_columns(pd.read_parquet(path), ym_column="ym")
     normalized_start = _normalize_ym_text(start_ym)
     if normalized_start:
         df = df[df["ym"] >= normalized_start].copy()
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def load_dashboard_jeonse_ratio_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """선계산된 전세가율 데이터를 로드한다."""
+    return _read_dashboard_table(DASHBOARD_JEONSE_RATIO_PATH, start_ym=start_ym)
+
+
+def load_dashboard_conversion_rate_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """선계산된 전월세 전환율 데이터를 로드한다."""
+    return _read_dashboard_table(DASHBOARD_CONVERSION_RATE_PATH, start_ym=start_ym)
+
+
+def load_dashboard_district_year_metrics_df() -> pd.DataFrame:
+    """선계산된 연도별 지역 지표 데이터를 로드한다."""
+    if not DASHBOARD_DISTRICT_YEAR_METRICS_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(DASHBOARD_DISTRICT_YEAR_METRICS_PATH).reset_index(drop=True)
+
+
+def load_dashboard_cycle_features_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """선계산된 시장 사이클 특징량 데이터를 로드한다."""
+    return _read_dashboard_table(DASHBOARD_CYCLE_FEATURES_PATH, start_ym=start_ym)
+
+
+def load_dashboard_trade_anomalies_df(
+    years: Sequence[int] | None = None,
+    region_codes: Sequence[str] | None = None,
+    columns: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """선계산된 이상거래 데이터를 로드한다."""
+    if not DASHBOARD_TRADE_ANOMALIES_PATH.exists():
+        return pd.DataFrame()
+
+    filter_clauses: list[tuple[str, str, object]] = []
+    year_set = {int(year) for year in years} if years else set()
+    code_set = {str(code) for code in region_codes} if region_codes else set()
+    if year_set:
+        filter_clauses.append(("year", "in", sorted(year_set)))
+    if code_set:
+        filter_clauses.append(("region_code", "in", sorted(code_set)))
+
+    requested_columns = list(columns) if columns is not None else None
+    try:
+        df = pd.read_parquet(
+            DASHBOARD_TRADE_ANOMALIES_PATH,
+            columns=requested_columns,
+            filters=filter_clauses or None,
+        )
+    except Exception:
+        df = _read_parquet_optional_columns(DASHBOARD_TRADE_ANOMALIES_PATH, requested_columns)
+
+    if df.empty:
+        return df
+
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        if "ym" not in df.columns:
+            df["ym"] = df["date"].dt.strftime("%Y%m")
+        if "year" not in df.columns:
+            df["year"] = df["date"].dt.year
+    if year_set and "year" in df.columns:
+        df = df[df["year"].isin(year_set)].copy()
+    if code_set and "region_code" in df.columns:
+        df = df[df["region_code"].astype(str).isin(code_set)].copy()
     return df.sort_values("date").reset_index(drop=True)
 
 
@@ -502,4 +603,3 @@ def add_seoul_coordinates(df: pd.DataFrame, code_col: str = "_lawd_cd") -> pd.Da
     result["lat"] = result[code_col].astype(str).map(lambda code: SEOUL_DISTRICT_COORDS.get(code, (np.nan, np.nan))[0])
     result["lon"] = result[code_col].astype(str).map(lambda code: SEOUL_DISTRICT_COORDS.get(code, (np.nan, np.nan))[1])
     return result
-

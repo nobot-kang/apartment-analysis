@@ -1,4 +1,4 @@
-﻿"""Level 2 심화 비교 분석."""
+"""Level 2 심화 비교 분석."""
 
 from __future__ import annotations
 
@@ -8,66 +8,23 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from analysis.common import (
-    ANALYSIS_START_YM,
     FLOOR_BINS,
     FLOOR_LABELS,
     add_seoul_coordinates,
-    aggregate_rent_scope,
     aggregate_trade_scope,
-    load_rent_summary_df,
-    load_trade_detail_df,
-    load_trade_summary_df,
 )
 from analysis.correlation import lagged_correlation
 
 
-def _aggregate_yearly_trade(trade: pd.DataFrame, include_price_per_m2: bool = True) -> pd.DataFrame:
-    """연도/지역 단위 가중 평균 매매 지표를 계산한다."""
-    if trade.empty:
-        columns = ["_lawd_cd", "_region_name", "year", "avg_price", "trade_count"]
-        if include_price_per_m2:
-            columns.append("avg_price_per_m2")
-        return pd.DataFrame(columns=columns)
-
-    base_columns = ["_lawd_cd", "_region_name", "year", "평균거래금액", "거래건수"]
-    if include_price_per_m2:
-        base_columns.append("평균거래금액_전용면적당")
-    working = trade[base_columns].copy()
-    working["weighted_price"] = working["평균거래금액"] * working["거래건수"]
-    if include_price_per_m2:
-        working["weighted_price_per_m2"] = working["평균거래금액_전용면적당"] * working["거래건수"]
-
-    agg_spec: dict[str, tuple[str, str]] = {
-        "weighted_price": ("weighted_price", "sum"),
-        "trade_count": ("거래건수", "sum"),
-    }
-    if include_price_per_m2:
-        agg_spec["weighted_price_per_m2"] = ("weighted_price_per_m2", "sum")
-
-    yearly = (
-        working.groupby(["_lawd_cd", "_region_name", "year"], observed=True)
-        .agg(**agg_spec)
-        .reset_index()
-    )
-    yearly = yearly[yearly["trade_count"] > 0].copy()
-    yearly["avg_price"] = yearly["weighted_price"] / yearly["trade_count"]
-    if include_price_per_m2:
-        yearly["avg_price_per_m2"] = yearly["weighted_price_per_m2"] / yearly["trade_count"]
-    return yearly
-
-
-def build_district_year_heatmap(metric: str = "avg_price") -> go.Figure:
+def build_district_year_heatmap(yearly_metrics_df: pd.DataFrame, metric: str = "avg_price") -> go.Figure:
     """지역별 연간 평균 가격 또는 상승률 히트맵을 생성한다."""
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    if trade.empty:
-        return go.Figure()
+    if yearly_metrics_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="연도별 지역 지표 데이터 없음")
+        return fig
 
-    yearly = _aggregate_yearly_trade(trade, include_price_per_m2=True)
-    value_col = "avg_price"
-    if metric == "avg_price_per_m2":
-        value_col = "avg_price_per_m2"
-
-    pivot = yearly.pivot(index="_region_name", columns="year", values=value_col).sort_index()
+    value_col = "avg_price_per_m2" if metric == "avg_price_per_m2" else "avg_price"
+    pivot = yearly_metrics_df.pivot(index="_region_name", columns="year", values=value_col).sort_index()
     if metric == "yoy_change":
         pivot = pivot.pct_change(axis=1) * 100
 
@@ -97,17 +54,12 @@ def build_district_year_heatmap(metric: str = "avg_price") -> go.Figure:
     return fig
 
 
-def load_floor_premium_data(region_codes: list[str] | None = None, years: list[int] | None = None) -> pd.DataFrame:
+def prepare_floor_premium(trade_detail_df: pd.DataFrame) -> pd.DataFrame:
     """층수 프리미엄 비교용 상세 데이터를 만든다."""
-    df = load_trade_detail_df(
-        years=years,
-        region_codes=region_codes,
-        columns=["date", "price", "area", "floor", "dong_repr"],
-    )
-    if df.empty:
-        return df
+    if trade_detail_df.empty:
+        return trade_detail_df.copy()
 
-    result = df.copy()
+    result = trade_detail_df.copy()
     result["price_per_m2"] = result["price"] / result["area"].replace(0, pd.NA)
     result["floor_bin"] = pd.cut(result["floor"], bins=FLOOR_BINS, labels=FLOOR_LABELS, right=True)
     return result.dropna(subset=["price_per_m2", "floor_bin"])
@@ -143,17 +95,14 @@ def build_floor_premium_chart(df: pd.DataFrame, compare_regions: list[str], year
     return fig
 
 
-def load_yoy_map_data(target_year: int) -> pd.DataFrame:
+def prepare_yoy_map(yearly_metrics_df: pd.DataFrame, target_year: int) -> pd.DataFrame:
     """서울 자치구의 연간 평균 매매가 YoY 상승률 데이터를 준비한다."""
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    if trade.empty:
+    if yearly_metrics_df.empty:
         return pd.DataFrame()
 
-    seoul = trade[trade["_lawd_cd"].astype(str).str.startswith("11")].copy()
-    yearly = _aggregate_yearly_trade(seoul, include_price_per_m2=False)
-
-    current_year = yearly[yearly["year"] == target_year].copy()
-    previous_year = yearly[yearly["year"] == target_year - 1][["_lawd_cd", "avg_price"]].rename(columns={"avg_price": "prev_price"})
+    seoul = yearly_metrics_df[yearly_metrics_df["_lawd_cd"].astype(str).str.startswith("11")].copy()
+    current_year = seoul[seoul["year"] == target_year].copy()
+    previous_year = seoul[seoul["year"] == target_year - 1][["_lawd_cd", "avg_price"]].rename(columns={"avg_price": "prev_price"})
     yoy = current_year.merge(previous_year, on="_lawd_cd", how="left")
     yoy["yoy_pct"] = (yoy["avg_price"] / yoy["prev_price"] - 1) * 100
     yoy = add_seoul_coordinates(yoy)
@@ -163,7 +112,9 @@ def load_yoy_map_data(target_year: int) -> pd.DataFrame:
 def build_yoy_map(yoy_df: pd.DataFrame, target_year: int) -> go.Figure:
     """서울 자치구 YoY 상승률 버블맵을 표시한다."""
     if yoy_df.empty:
-        return go.Figure()
+        fig = go.Figure()
+        fig.update_layout(title=f"{target_year}년 YoY 지도 데이터 없음")
+        return fig
 
     fig = px.scatter_mapbox(
         yoy_df,
@@ -184,16 +135,20 @@ def build_yoy_map(yoy_df: pd.DataFrame, target_year: int) -> go.Figure:
     return fig
 
 
-def load_volume_price_lag_data(region_codes: list[str] | None = None, scope_name: str | None = None) -> pd.DataFrame:
+def prepare_volume_price_lag(
+    trade_summary_df: pd.DataFrame,
+    region_codes: list[str] | None = None,
+    scope_name: str | None = None,
+) -> pd.DataFrame:
     """거래량과 가격의 선후행 관계 분석용 월별 시계열을 만든다."""
-    trade_scope = aggregate_trade_scope(load_trade_summary_df(ANALYSIS_START_YM), region_codes, scope_name)
+    trade_scope = aggregate_trade_scope(trade_summary_df, region_codes, scope_name)
     if trade_scope.empty:
         return pd.DataFrame()
 
     result = trade_scope.copy()
     result["price_yoy"] = result["평균거래금액"].pct_change(12) * 100
     result["volume_yoy"] = result["거래건수"].pct_change(12) * 100
-    return result.dropna(subset=["price_yoy", "volume_yoy"])
+    return result.dropna(subset=["price_yoy", "volume_yoy"]).reset_index(drop=True)
 
 
 def build_volume_price_lag_chart(df: pd.DataFrame, scope_name: str) -> go.Figure:
@@ -233,20 +188,11 @@ def build_volume_price_lag_chart(df: pd.DataFrame, scope_name: str) -> go.Figure
     return fig
 
 
-def load_conversion_rate_data(region_codes: list[str] | None = None, scope_name: str | None = None) -> pd.DataFrame:
-    """전월세 전환율을 역산한다."""
-    rent_scope = aggregate_rent_scope(load_rent_summary_df(ANALYSIS_START_YM), region_codes, scope_name)
-    if rent_scope.empty:
-        return pd.DataFrame()
-
-    jeonse = rent_scope[rent_scope["rentType"] == "전세"]["ym date 평균보증금 scope_name".split()].rename(columns={"평균보증금": "jeonse_deposit"})
-    wolse = rent_scope[rent_scope["rentType"] == "월세"]["ym date 평균보증금 평균월세 거래건수 scope_name".split()].rename(columns={"평균보증금": "wolse_deposit", "거래건수": "sample_count"})
-    merged = wolse.merge(jeonse, on=["ym", "date", "scope_name"], how="left")
-    merged["deposit_gap"] = merged["jeonse_deposit"] - merged["wolse_deposit"]
-    merged = merged[merged["deposit_gap"] > 0].copy()
-    merged["conversion_rate"] = (merged["평균월세"] * 12 / merged["deposit_gap"]) * 100
-    merged = merged[(merged["conversion_rate"] >= 0) & (merged["conversion_rate"] <= 30)]
-    return merged.sort_values("date").reset_index(drop=True)
+def filter_conversion_rate(conversion_rate_df: pd.DataFrame, scope_name: str) -> pd.DataFrame:
+    """scope별 선계산 전월세 전환율 데이터를 필터링한다."""
+    if conversion_rate_df.empty:
+        return conversion_rate_df.copy()
+    return conversion_rate_df[conversion_rate_df["scope_name"] == scope_name].sort_values("date").reset_index(drop=True)
 
 
 def build_conversion_rate_chart(df: pd.DataFrame, scope_name: str) -> go.Figure:

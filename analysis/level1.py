@@ -1,4 +1,4 @@
-﻿"""Level 1 기초 현황 분석."""
+"""Level 1 기초 현황 분석."""
 
 from __future__ import annotations
 
@@ -9,23 +9,19 @@ from plotly.subplots import make_subplots
 
 from analysis.common import (
     AGE_LABELS,
-    ANALYSIS_START_YM,
     AREA_BINS,
     AREA_LABELS,
     POLICY_EVENTS,
     aggregate_rent_scope,
     aggregate_trade_scope,
     classify_age,
-    load_rent_summary_df,
-    load_trade_detail_df,
-    load_trade_summary_df,
 )
 
 RISK_THRESHOLD = 80.0
 
 
 def _add_datetime_event_marker(fig: go.Figure, event_date: pd.Timestamp, label: str) -> None:
-    """Plotly의 datetime 축 add_vline 주석 버그를 우회해 이벤트 마커를 추가한다."""
+    """Plotly datetime 축의 add_vline 주석 버그를 우회해 이벤트 마커를 추가한다."""
     fig.add_vline(x=event_date, line_dash="dash", line_color="gray")
     fig.add_annotation(
         x=event_date,
@@ -41,36 +37,53 @@ def _add_datetime_event_marker(fig: go.Figure, event_date: pd.Timestamp, label: 
     )
 
 
-def _aggregate_yearly_trade(trade: pd.DataFrame) -> pd.DataFrame:
-    """연도/지역 단위 가중 평균 매매 지표를 계산한다."""
-    if trade.empty:
-        return pd.DataFrame(
-            columns=["year", "_lawd_cd", "_region_name", "avg_price", "avg_price_per_m2", "trade_count"]
-        )
+def build_overview_metrics(
+    trade_df: pd.DataFrame,
+    rent_df: pd.DataFrame,
+    macro_df: pd.DataFrame,
+) -> dict[str, float]:
+    """Level 1 상단 KPI를 계산한다."""
+    if trade_df.empty:
+        return {
+            "latest_avg_trade": float("nan"),
+            "latest_trade_count": float("nan"),
+            "latest_ratio": float("nan"),
+            "latest_rate": float("nan"),
+            "latest_ym": "N/A",
+        }
 
-    working = trade[["year", "_lawd_cd", "_region_name", "평균거래금액", "평균거래금액_전용면적당", "거래건수"]].copy()
-    working["weighted_price"] = working["평균거래금액"] * working["거래건수"]
-    working["weighted_price_per_m2"] = working["평균거래금액_전용면적당"] * working["거래건수"]
+    latest_ym = str(trade_df["ym"].max())
+    latest_trade = trade_df[trade_df["ym"] == latest_ym].copy()
+    latest_rent = rent_df[(rent_df["ym"] == latest_ym) & (rent_df["rentType"] == "전세")].copy() if not rent_df.empty else pd.DataFrame()
 
-    yearly = (
-        working.groupby(["year", "_lawd_cd", "_region_name"], observed=True)
-        .agg(
-            weighted_price=("weighted_price", "sum"),
-            weighted_price_per_m2=("weighted_price_per_m2", "sum"),
-            trade_count=("거래건수", "sum"),
-        )
-        .reset_index()
-    )
-    yearly = yearly[yearly["trade_count"] > 0].copy()
-    yearly["avg_price"] = yearly["weighted_price"] / yearly["trade_count"]
-    yearly["avg_price_per_m2"] = yearly["weighted_price_per_m2"] / yearly["trade_count"]
-    return yearly
+    latest_ratio = float("nan")
+    if not latest_trade.empty and not latest_rent.empty:
+        latest_ratio = float(latest_rent["평균보증금"].mean() / latest_trade["평균거래금액"].mean() * 100)
+
+    latest_rate = float("nan")
+    if not macro_df.empty and "bok_rate" in macro_df.columns:
+        valid_rates = macro_df["bok_rate"].dropna()
+        if not valid_rates.empty:
+            latest_rate = float(valid_rates.iloc[-1])
+
+    return {
+        "latest_avg_trade": float(latest_trade["평균거래금액"].mean()) if not latest_trade.empty else float("nan"),
+        "latest_trade_count": float(latest_trade["거래건수"].sum()) if not latest_trade.empty else float("nan"),
+        "latest_ratio": latest_ratio,
+        "latest_rate": latest_rate,
+        "latest_ym": latest_ym,
+    }
 
 
-def load_monthly_volume(region_codes: list[str] | None = None, scope_name: str | None = None) -> pd.DataFrame:
+def build_monthly_volume_frame(
+    trade_df: pd.DataFrame,
+    rent_df: pd.DataFrame,
+    region_codes: list[str] | None = None,
+    scope_name: str | None = None,
+) -> pd.DataFrame:
     """매매·전세·월세 거래량을 long format으로 정리한다."""
-    trade = aggregate_trade_scope(load_trade_summary_df(), region_codes, scope_name)
-    rent = aggregate_rent_scope(load_rent_summary_df(), region_codes, scope_name)
+    trade = aggregate_trade_scope(trade_df, region_codes, scope_name)
+    rent = aggregate_rent_scope(rent_df, region_codes, scope_name)
 
     trade_long = trade[["ym", "date", "거래건수", "scope_name"]].copy() if not trade.empty else pd.DataFrame()
     if not trade_long.empty:
@@ -103,7 +116,7 @@ def build_monthly_volume_chart(df: pd.DataFrame, scope_name: str, highlight_even
 
     colors = {"매매": "#D1495B", "전세": "#3E7CB1", "월세": "#2A9D8F"}
     for deal_type in ["매매", "전세", "월세"]:
-        subset = df[df["deal_type"] == deal_type]
+        subset = df[df["deal_type"] == deal_type].copy()
         if subset.empty:
             continue
         fig.add_trace(
@@ -119,7 +132,7 @@ def build_monthly_volume_chart(df: pd.DataFrame, scope_name: str, highlight_even
             col=1,
         )
 
-    trade_only = df[df["deal_type"] == "매매"]
+    trade_only = df[df["deal_type"] == "매매"].copy()
     if not trade_only.empty:
         fig.add_trace(
             go.Bar(
@@ -148,17 +161,14 @@ def build_monthly_volume_chart(df: pd.DataFrame, scope_name: str, highlight_even
     return fig
 
 
-def load_district_ranking(year: int) -> pd.DataFrame:
-    """연도별 지역 랭킹 계산용 집계 데이터를 반환한다."""
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    if trade.empty:
+def filter_district_ranking(yearly_metrics_df: pd.DataFrame, year: int) -> pd.DataFrame:
+    """연도별 지역 랭킹 집계를 필터링한다."""
+    if yearly_metrics_df.empty:
         return pd.DataFrame(columns=["_lawd_cd", "_region_name", "avg_price", "avg_price_per_m2", "trade_count"])
 
-    yearly = _aggregate_yearly_trade(trade)
-    result = yearly[yearly["year"] == year].copy()
+    result = yearly_metrics_df[yearly_metrics_df["year"] == year].copy()
     if result.empty:
         return pd.DataFrame(columns=["_lawd_cd", "_region_name", "avg_price", "avg_price_per_m2", "trade_count"])
-
     return result.sort_values("avg_price", ascending=True).reset_index(drop=True)
 
 
@@ -190,16 +200,12 @@ def build_ranking_chart(df: pd.DataFrame, year: int, metric: str = "avg_price") 
     return fig
 
 
-def build_ranking_animation(metric: str = "avg_price") -> go.Figure:
+def build_ranking_animation(yearly_metrics_df: pd.DataFrame, metric: str = "avg_price") -> go.Figure:
     """연도별 지역 랭킹 변화를 애니메이션 바차트로 생성한다."""
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    if trade.empty:
+    if yearly_metrics_df.empty:
         return px.bar(title="랭킹 데이터가 없습니다.")
 
-    yearly = _aggregate_yearly_trade(trade)
-    if yearly.empty:
-        return px.bar(title="랭킹 데이터가 없습니다.")
-
+    yearly = yearly_metrics_df.copy()
     yearly["year_label"] = yearly["year"].astype(int).astype(str)
     max_value = yearly[metric].max(skipna=True)
     if pd.isna(max_value) or max_value <= 0:
@@ -226,17 +232,12 @@ def build_ranking_animation(metric: str = "avg_price") -> go.Figure:
     return fig
 
 
-def load_area_distribution(region_codes: list[str] | None = None, years: list[int] | None = None) -> pd.DataFrame:
-    """면적 구간별 가격 분포 분석용 상세 데이터를 불러온다."""
-    df = load_trade_detail_df(
-        years=years,
-        region_codes=region_codes,
-        columns=["date", "price", "area", "dong_repr"],
-    )
-    if df.empty:
-        return df
+def prepare_area_distribution(trade_detail_df: pd.DataFrame) -> pd.DataFrame:
+    """면적 구간별 가격 분포 분석용 상세 데이터를 정리한다."""
+    if trade_detail_df.empty:
+        return trade_detail_df.copy()
 
-    result = df.copy()
+    result = trade_detail_df.copy()
     result["area_bin"] = pd.cut(result["area"], bins=AREA_BINS, labels=AREA_LABELS, right=False)
     return result.dropna(subset=["area_bin", "price"])
 
@@ -250,7 +251,7 @@ def build_area_boxplot(df: pd.DataFrame, area_bin: str, scope_name: str) -> go.F
         return fig
 
     low, high = subset["price"].quantile([0.01, 0.99])
-    subset = subset[subset["price"].between(low, high)]
+    subset = subset[subset["price"].between(low, high)].copy()
     for year in sorted(subset["year"].dropna().unique()):
         fig.add_trace(
             go.Box(
@@ -270,17 +271,12 @@ def build_area_boxplot(df: pd.DataFrame, area_bin: str, scope_name: str) -> go.F
     return fig
 
 
-def load_age_premium(region_codes: list[str] | None = None, years: list[int] | None = None) -> pd.DataFrame:
+def prepare_age_premium(trade_detail_df: pd.DataFrame) -> pd.DataFrame:
     """건축 연령 프리미엄 분석용 상세 데이터를 생성한다."""
-    df = load_trade_detail_df(
-        years=years,
-        region_codes=region_codes,
-        columns=["date", "price", "area", "age", "dong_repr"],
-    )
-    if df.empty:
-        return df
+    if trade_detail_df.empty:
+        return trade_detail_df.copy()
 
-    result = df.copy()
+    result = trade_detail_df.copy()
     result["price_per_m2"] = result["price"] / result["area"].replace(0, pd.NA)
     result["age_bin"] = result["age"].apply(classify_age)
     return result.dropna(subset=["price_per_m2"])
@@ -315,24 +311,6 @@ def build_age_premium_chart(df: pd.DataFrame, region_name: str, year: int) -> go
     fig.update_traces(textposition="outside")
     fig.update_layout(height=460, coloraxis_showscale=False)
     return fig
-
-
-def load_jeonse_ratio() -> pd.DataFrame:
-    """매매가 대비 전세보증금 비율을 계산한다."""
-    trade = load_trade_summary_df(ANALYSIS_START_YM)
-    rent = load_rent_summary_df(ANALYSIS_START_YM)
-    if trade.empty or rent.empty:
-        return pd.DataFrame()
-
-    jeonse = rent[rent["rentType"] == "전세"][["ym", "date", "_lawd_cd", "_region_name", "평균보증금", "거래건수"]].copy()
-    merged = trade.merge(
-        jeonse,
-        on=["ym", "date", "_lawd_cd", "_region_name"],
-        how="inner",
-        suffixes=("_trade", "_jeonse"),
-    )
-    merged["전세가율"] = (merged["평균보증금"] / merged["평균거래금액"]) * 100
-    return merged.sort_values(["_lawd_cd", "ym"]).reset_index(drop=True)
 
 
 def build_jeonse_ratio_chart(df: pd.DataFrame, region_name: str) -> go.Figure:
