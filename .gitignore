@@ -12,6 +12,7 @@ data/raw/
 # data/processed/
 data/processed/apt_trade.parquet
 data/processed/apt_rent.parquet
+data/processed/complex_forecast_targets.parquet
 
 # Python 캐시
 __pycache__/
