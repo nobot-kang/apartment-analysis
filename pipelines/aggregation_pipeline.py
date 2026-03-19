@@ -22,6 +22,7 @@ from config.settings import (
     PROCESSED_DIR,
     SEOUL_REGIONS,
 )
+from pipelines.representative_complex_pipeline import RepresentativeComplexPipeline
 
 
 class AggregationPipeline:
@@ -1043,6 +1044,18 @@ class AggregationPipeline:
         self._write_output_parquet("complex_forecast_targets.parquet", panel)
         return panel
 
+    def build_representative_datasets(
+        self,
+        complex_master: pd.DataFrame | None = None,
+        macro_monthly: pd.DataFrame | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """59형/84형 대표단지 분석용 선계산 parquet를 생성한다."""
+        pipeline = RepresentativeComplexPipeline(output_dir=self.output_dir)
+        return pipeline.run_all(
+            complex_master=complex_master if complex_master is not None else self._read_output_parquet("complex_master.parquet"),
+            macro_monthly=macro_monthly if macro_monthly is not None else self._read_output_parquet("macro_monthly.parquet"),
+        )
+
     def run_all(self) -> None:
         """매매 집계, 전월세 집계, 거시지표 통합, 대시보드 데이터셋 생성을 순차 실행한다."""
         trade_summary = self.build_monthly_trade_summary()
@@ -1052,6 +1065,7 @@ class AggregationPipeline:
         complex_master = self.build_complex_master()
         complex_panel = self.build_complex_monthly_panel(complex_master=complex_master, macro_monthly=macro_monthly)
         self.build_complex_forecast_targets(complex_panel)
+        self.build_representative_datasets(complex_master=complex_master, macro_monthly=macro_monthly)
         logger.info("전체 집계 파이프라인 완료")
 
 

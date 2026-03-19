@@ -87,6 +87,12 @@ DASHBOARD_TRADE_ANOMALIES_PATH = PROCESSED_DIR / "dashboard_trade_anomalies.parq
 COMPLEX_MASTER_PATH = PROCESSED_DIR / "complex_master.parquet"
 COMPLEX_MONTHLY_PANEL_PATH = PROCESSED_DIR / "complex_monthly_panel.parquet"
 COMPLEX_FORECAST_TARGETS_PATH = PROCESSED_DIR / "complex_forecast_targets.parquet"
+REPRESENTATIVE_COMPLEX_UNIVERSE_PATH = PROCESSED_DIR / "representative_complex_universe.parquet"
+REPRESENTATIVE_TRADE_BAND_MONTHLY_PATH = PROCESSED_DIR / "representative_trade_band_monthly.parquet"
+REPRESENTATIVE_RENT_BAND_MONTHLY_PATH = PROCESSED_DIR / "representative_rent_band_monthly.parquet"
+REPRESENTATIVE_PAIR_GAP_MONTHLY_PATH = PROCESSED_DIR / "representative_pair_gap_monthly.parquet"
+REPRESENTATIVE_REGION_MONTHLY_PATH = PROCESSED_DIR / "representative_region_monthly.parquet"
+REPRESENTATIVE_FORECAST_TARGETS_PATH = PROCESSED_DIR / "representative_forecast_targets.parquet"
 
 
 def optional_import(module_name: str):
@@ -530,6 +536,38 @@ def load_complex_forecast_targets_df(start_ym: str | None = ANALYSIS_START_YM) -
         df = df[df["ym"] >= normalized_start].copy()
 
     return df.sort_values(["ym", "aptSeq"]).reset_index(drop=True)
+
+
+def load_representative_complex_universe_df() -> pd.DataFrame:
+    """Load the representative-complex lookup table."""
+    if not REPRESENTATIVE_COMPLEX_UNIVERSE_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(REPRESENTATIVE_COMPLEX_UNIVERSE_PATH).reset_index(drop=True)
+
+
+def load_representative_trade_band_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative trade band monthly panel."""
+    return _read_dashboard_table(REPRESENTATIVE_TRADE_BAND_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_rent_band_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative rent band monthly panel."""
+    return _read_dashboard_table(REPRESENTATIVE_RENT_BAND_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_pair_gap_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative pair-gap monthly panel."""
+    return _read_dashboard_table(REPRESENTATIVE_PAIR_GAP_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_region_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative region monthly aggregates."""
+    return _read_dashboard_table(REPRESENTATIVE_REGION_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_forecast_targets_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative forecast target panel."""
+    return _read_dashboard_table(REPRESENTATIVE_FORECAST_TARGETS_PATH, start_ym=start_ym)
 
 
 def load_trade_detail_df(

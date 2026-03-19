@@ -76,6 +76,34 @@ NAVIGATION = {
         "비율 예측": ("dashboard.pages.page_09_complex_forecast", "render_complex_ratio_forecast"),
         "시나리오": ("dashboard.pages.page_09_complex_forecast", "render_complex_scenario"),
     },
+    "Representative Level 1 · 대표단지 현황": {
+        "대표단지 커버리지": ("dashboard.pages.page_10_representative_overview", "render_representative_coverage"),
+        "지역 평당가 타임라인": ("dashboard.pages.page_10_representative_overview", "render_representative_region_timeline"),
+        "59형 vs 84형 비교": ("dashboard.pages.page_10_representative_overview", "render_representative_band_comparison"),
+        "특정 시점 분포도": ("dashboard.pages.page_10_representative_overview", "render_representative_distribution_snapshot"),
+        "단지별 pair gap": ("dashboard.pages.page_10_representative_overview", "render_representative_pair_gap_history"),
+    },
+    "Representative Level 2 · 평당가 구조": {
+        "매매 spread": ("dashboard.pages.page_11_representative_drivers", "render_representative_sale_spread"),
+        "전세 spread": ("dashboard.pages.page_11_representative_drivers", "render_representative_jeonse_spread"),
+        "월세 spread": ("dashboard.pages.page_11_representative_drivers", "render_representative_wolse_spread"),
+        "전세가율 band 비교": ("dashboard.pages.page_11_representative_drivers", "render_representative_jeonse_ratio"),
+        "유동성/보간 진단": ("dashboard.pages.page_11_representative_drivers", "render_representative_liquidity"),
+    },
+    "Representative Level 3 · 동학/확산": {
+        "롤링 계수": ("dashboard.pages.page_12_representative_dynamics", "render_representative_rolling_coefficients"),
+        "패널 고정효과": ("dashboard.pages.page_12_representative_dynamics", "render_representative_panel_fe"),
+        "거시 국면 반응": ("dashboard.pages.page_12_representative_dynamics", "render_representative_regime_response"),
+        "지역 확산": ("dashboard.pages.page_12_representative_dynamics", "render_representative_spillover"),
+        "평균회귀": ("dashboard.pages.page_12_representative_dynamics", "render_representative_mean_reversion"),
+    },
+    "Representative Level 4 · 예측/시나리오": {
+        "59형 예측": ("dashboard.pages.page_13_representative_forecast", "render_representative_sale59_forecast"),
+        "84형 예측": ("dashboard.pages.page_13_representative_forecast", "render_representative_sale84_forecast"),
+        "pair gap 예측": ("dashboard.pages.page_13_representative_forecast", "render_representative_gap_forecast"),
+        "지역 스크리닝": ("dashboard.pages.page_13_representative_forecast", "render_representative_screening"),
+        "시나리오": ("dashboard.pages.page_13_representative_forecast", "render_representative_scenario"),
+    },
 }
 
 
