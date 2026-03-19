@@ -84,6 +84,9 @@ DASHBOARD_CONVERSION_RATE_PATH = PROCESSED_DIR / "dashboard_conversion_rate_mont
 DASHBOARD_DISTRICT_YEAR_METRICS_PATH = PROCESSED_DIR / "dashboard_district_year_metrics.parquet"
 DASHBOARD_CYCLE_FEATURES_PATH = PROCESSED_DIR / "dashboard_cycle_features.parquet"
 DASHBOARD_TRADE_ANOMALIES_PATH = PROCESSED_DIR / "dashboard_trade_anomalies.parquet"
+COMPLEX_MASTER_PATH = PROCESSED_DIR / "complex_master.parquet"
+COMPLEX_MONTHLY_PANEL_PATH = PROCESSED_DIR / "complex_monthly_panel.parquet"
+COMPLEX_FORECAST_TARGETS_PATH = PROCESSED_DIR / "complex_forecast_targets.parquet"
 
 
 def optional_import(module_name: str):
@@ -488,6 +491,45 @@ def load_apartment_info_df() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     return pd.read_parquet(path)
+
+
+def load_complex_master_df() -> pd.DataFrame:
+    """단지 정적 특성 마스터를 로드한다."""
+    if not COMPLEX_MASTER_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(COMPLEX_MASTER_PATH)
+
+
+def load_complex_monthly_panel_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """단지-월 패널 데이터를 로드한다."""
+    return _read_dashboard_table(COMPLEX_MONTHLY_PANEL_PATH, start_ym=start_ym)
+
+
+def load_complex_forecast_targets_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """단지 예측용 타깃/래그 패널을 로드한다.
+
+    GitHub 파일 크기 제한(100MB)을 피하기 위해 `complex_forecast_targets_part*.parquet`
+    조각들이 존재하면 이를 모두 읽어 합친다.
+    """
+    part_paths = sorted(PROCESSED_DIR.glob("complex_forecast_targets_part*.parquet"))
+    if part_paths:
+        frames = [pd.read_parquet(path) for path in part_paths]
+        df = pd.concat(frames, ignore_index=True)
+    else:
+        df = _read_dashboard_table(COMPLEX_FORECAST_TARGETS_PATH, start_ym=start_ym)
+        return df
+
+    if df.empty:
+        return df
+
+    if "ym" in df.columns or "date" in df.columns:
+        df = ensure_month_columns(df, ym_column="ym")
+
+    normalized_start = _normalize_ym_text(start_ym)
+    if normalized_start and "ym" in df.columns:
+        df = df[df["ym"] >= normalized_start].copy()
+
+    return df.sort_values(["ym", "aptSeq"]).reset_index(drop=True)
 
 
 def load_trade_detail_df(
