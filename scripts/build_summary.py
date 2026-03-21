@@ -19,6 +19,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from pipelines.aggregation_pipeline import AggregationPipeline
+from pipelines.building_ledger_summary import BuildingLedgerSummarizer
 
 
 def main() -> None:
@@ -35,6 +36,7 @@ def main() -> None:
     )
 
     logger.info("집계 파이프라인 시작")
+    BuildingLedgerSummarizer().summarize()
     pipeline = AggregationPipeline()
     pipeline.run_all()
     logger.info("집계 파이프라인 완료")

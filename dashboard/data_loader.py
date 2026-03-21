@@ -14,12 +14,21 @@ if str(_project_root) not in sys.path:
 
 from analysis.common import (
     get_scope_options,
+    load_complex_forecast_targets_df,
+    load_complex_master_df,
+    load_complex_monthly_panel_df,
     load_dashboard_conversion_rate_df,
     load_dashboard_cycle_features_df,
     load_dashboard_district_year_metrics_df,
     load_dashboard_jeonse_ratio_df,
     load_dashboard_trade_anomalies_df,
     load_macro_monthly_df,
+    load_representative_complex_universe_df,
+    load_representative_forecast_targets_df,
+    load_representative_pair_gap_monthly_df,
+    load_representative_region_monthly_df,
+    load_representative_rent_band_monthly_df,
+    load_representative_trade_band_monthly_df,
     load_rent_detail_df,
     load_rent_summary_df,
     load_trade_detail_df,
@@ -52,6 +61,60 @@ def load_rent_summary() -> pd.DataFrame:
 def load_macro_monthly() -> pd.DataFrame:
     """월별 거시지표 통합 데이터를 로드한다."""
     return load_macro_monthly_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_complex_master() -> pd.DataFrame:
+    """단지 정적 특성 마스터를 로드한다."""
+    return load_complex_master_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_complex_monthly_panel() -> pd.DataFrame:
+    """단지-월 패널 데이터를 로드한다."""
+    return load_complex_monthly_panel_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_complex_forecast_targets() -> pd.DataFrame:
+    """단지 예측용 타깃 패널을 로드한다."""
+    return load_complex_forecast_targets_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_representative_complex_universe() -> pd.DataFrame:
+    """Load the representative-complex universe."""
+    return load_representative_complex_universe_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_representative_trade_band_monthly() -> pd.DataFrame:
+    """Load the representative trade band panel."""
+    return load_representative_trade_band_monthly_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_representative_rent_band_monthly() -> pd.DataFrame:
+    """Load the representative rent band panel."""
+    return load_representative_rent_band_monthly_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_representative_pair_gap_monthly() -> pd.DataFrame:
+    """Load the representative pair-gap panel."""
+    return load_representative_pair_gap_monthly_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_representative_region_monthly() -> pd.DataFrame:
+    """Load the representative region aggregates."""
+    return load_representative_region_monthly_df()
+
+
+@st.cache_resource(show_spinner=False)
+def load_representative_forecast_targets() -> pd.DataFrame:
+    """Load the representative forecast panel."""
+    return load_representative_forecast_targets_df()
 
 
 @st.cache_resource(show_spinner=False)

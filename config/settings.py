@@ -69,7 +69,9 @@ MOLIT_API_SLEEP: float = 0.2
 # ---------------------------------------------------------------------------
 # 건축물대장 API
 # ---------------------------------------------------------------------------
-BUILDING_LEDGER_ENDPOINT: str = f"{MOLIT_BASE_URL}/BldRgstHubService/getBrTitleInfo"
+BUILDING_LEDGER_TITLE_ENDPOINT: str = f"{MOLIT_BASE_URL}/BldRgstHubService/getBrTitleInfo"
+BUILDING_LEDGER_RECAP_ENDPOINT: str = f"{MOLIT_BASE_URL}/BldRgstHubService/getBrRecapTitleInfo"
+BUILDING_LEDGER_ENDPOINT: str = BUILDING_LEDGER_TITLE_ENDPOINT
 
 # ---------------------------------------------------------------------------
 # 한국은행 ECOS API
