@@ -108,7 +108,23 @@ def _get_pair_gap_history(apt_seq: str) -> pd.DataFrame:
 
 
 def render_representative_coverage() -> None:
-    st.header("Representative Level 1 - 대표단지 coverage")
+    st.header("🏡 대표 단지 데이터 커버리지")
+    with st.expander("📖 이 페이지 읽는 법"):
+        st.markdown("""
+        **대표 단지란?** 서울 각 지역에서 59㎡(약 18평)와 84㎡(약 25평) 평형이 모두 있어 비교 가능한 아파트 단지들.
+
+        **주요 수치 해석:**
+        - **대표단지 수**: 분석에 포함된 단지 수.
+        - **Pair 단지 수**: 59형·84형이 모두 있어 두 평형을 직접 비교할 수 있는 단지 수.
+        - **59형 보유 / 84형 보유**: 각 평형이 있는 단지 수.
+
+        **커버리지 그래프 해석:**
+        - 막대가 짧거나 공백이 많은 지역 = 그 지역의 데이터가 적어 분석 결과가 불안정할 수 있음.
+        - 전체 커버리지가 높을수록 분석의 신뢰도가 높아짐.
+
+        **💡 팁:** 지역 단위를 '시군구'에서 '법정동'으로 바꾸면 더 세밀하게 볼 수 있지만 데이터가 분산됩니다.
+        """)
+
     region_level = st.radio(
         "지역 단위",
         options=["sigungu", "bjdong"],
@@ -131,7 +147,22 @@ def render_representative_coverage() -> None:
 
 
 def render_representative_region_timeline() -> None:
-    st.header("Representative Level 1 - 지역별 평당가 타임라인")
+    st.header("🏡 지역별 평당가 흐름")
+    with st.expander("📖 이 페이지 읽는 법"):
+        st.markdown("""
+        **평당가란?** 1평(약 3.3㎡)당 가격(만원). 서울 아파트는 보통 평당 3,000~1억원 이상 범위.
+
+        **평당가로 보는 이유:** 면적이 다른 아파트들을 공평하게 비교하기 위해 면적을 통일한 지표.
+        - 예: 서울 강남구 평당가 1억 = 25평(84㎡) 아파트 기준 25억
+
+        **주요 수치 해석:**
+        - **최근 대표 평당가 (만원/평)**: 가장 최근 달의 해당 지역 중앙값 평당가.
+        - **활성 단지 수**: 해당 월에 데이터가 있는 단지 수(실거래 + 보간 포함).
+        - **실관측 단지 수**: 실제 거래가 있어서 직접 계산된 단지 수 (보간 제외). 활성 단지 대비 비율이 낮으면 그 달 실거래가 드물었다는 의미.
+
+        **선 그래프 해석:** 선이 오르면 그 지역·평형의 평당가가 상승 중.
+        """)
+
     controls = st.columns([1.0, 1.0, 1.0, 1.5])
     region_level = controls[0].radio(
         "지역 단위",
@@ -177,7 +208,22 @@ def render_representative_region_timeline() -> None:
 
 
 def render_representative_band_comparison() -> None:
-    st.header("Representative Level 1 - 지역별 59형 vs 84형 비교")
+    st.header("🏡 59형 vs 84형 가격 비교")
+    with st.expander("📖 이 페이지 읽는 법"):
+        st.markdown("""
+        **59형 vs 84형이란?** 전용면적 59㎡(약 18평, 방 2~3개)와 84㎡(약 25평, 방 3개)를 비교.
+
+        **주요 수치 해석:**
+        - **59형 평당가 / 84형 평당가**: 각 평형의 1평당 가격.
+        - **84/59 격차율 (%)**: 84형이 59형보다 몇 % 더 비싼지.
+          - 예: 격차율 20% → 59형 5,000만원/평이면 84형은 6,000만원/평
+          - 격차율이 0%에 가까우면 두 평형이 비슷한 가격
+          - 격차율이 마이너스이면 오히려 59형이 더 비싼 역전 현상
+
+        **그래프에서 두 선이 벌어지면:** 84형이 59형보다 더 빠르게 오르는 중 (대형 선호 강해짐).
+        **두 선이 좁혀지면:** 59형이 상대적으로 강세 (소형 선호 강해지거나 대형 약세).
+        """)
+
     controls = st.columns([1.0, 1.0, 1.5])
     region_level = controls[0].radio(
         "지역 단위",
@@ -214,7 +260,23 @@ def render_representative_band_comparison() -> None:
 
 
 def render_representative_distribution_snapshot() -> None:
-    st.header("Representative Level 1 - 특정 시점 지역 분포")
+    st.header("🏡 특정 시점 지역별 가격 분포")
+    with st.expander("📖 이 페이지 읽는 법"):
+        st.markdown("""
+        **보는 순서:** ① 평형·지역 단위·기준 월 선택 → ② 분포 그래프 확인 → ③ 단지별 표 확인
+
+        **그래프 해석:**
+        - **각 막대**: 지역별 평균 평당가. 막대가 높을수록 비싼 지역.
+        - **가로축 지역 순서**: 평당가 높은 순으로 정렬.
+        - **기준 월 바꾸기**: 과거와 현재를 비교해 어느 지역이 많이 올랐는지 확인 가능.
+
+        **표의 'is_trade_imputed' 열:**
+        - **False**: 해당 달에 실제 거래가 있어 직접 계산된 가격.
+        - **True**: 해당 달에 거래가 없어 앞뒤 데이터로 보간(추정)된 가격 → 신뢰도가 낮을 수 있음.
+
+        **💡 팁:** '보간 사용' 단지가 많은 지역은 그 달의 가격이 부정확할 수 있으므로 주의하세요.
+        """)
+
     trade_df = load_representative_trade_band_monthly()
     if trade_df.empty:
         st.warning("대표단지 거래 band 데이터가 없습니다.")
@@ -259,7 +321,22 @@ def render_representative_distribution_snapshot() -> None:
 
 
 def render_representative_pair_gap_history() -> None:
-    st.header("Representative Level 1 - 단지별 pair gap 히스토리")
+    st.header("🏡 단지별 59형·84형 가격 차이 추이")
+    with st.expander("📖 이 페이지 읽는 법"):
+        st.markdown("""
+        **Pair Gap이란?** 같은 단지 안에서 84형과 59형의 평당가 차이 비율. 같은 단지이므로 입지는 동일, 순수하게 '평형 크기의 가치'만 비교.
+
+        **주요 수치 해석:**
+        - **84/59 격차율 (%)**: 84형이 59형보다 평당 몇 % 더 비싼지.
+          - 예: 격차율 15% → 59형 5,000만원/평, 84형 5,750만원/평
+          - 격차율 0% → 두 평형이 같은 평당가 (면적이 클수록 총액은 비싸지만 평당은 같음)
+          - 격차율 마이너스 → 59형이 84형보다 평당 더 비쌈 (소형 희소성 또는 재건축 이슈)
+        - **보간 사용**: "예"이면 해당 달 실거래 없이 추정값 사용 → 신뢰도 주의.
+        - **fill age (표)**: 보간에 사용된 앞뒤 데이터가 몇 달 전/후 것인지. 클수록 오래된 데이터로 채워진 것.
+
+        **선 그래프 위로 올라가면:** 84형과 59형 격차 벌어지는 중 (대형 선호 강해짐).
+        """)
+
     controls = st.columns([1.0, 1.2, 1.8])
     region_level = controls[0].radio(
         "지역 단위",
