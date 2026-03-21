@@ -22,6 +22,7 @@ from config.settings import (
     PROCESSED_DIR,
     SEOUL_REGIONS,
 )
+from pipelines.representative_complex_pipeline import RepresentativeComplexPipeline
 
 
 class AggregationPipeline:
@@ -66,6 +67,53 @@ class AggregationPipeline:
         "rentType",
         "apt_name_repr",
         "dong_repr",
+    ]
+    COMPLEX_FORECAST_TARGET_COLUMNS: list[str] = [
+        "aptSeq",
+        "ym",
+        "date",
+        "completion_year",
+        "household_count",
+        "parking_per_household",
+        "floor_area_ratio",
+        "building_coverage_ratio",
+        "avg_land_area_per_household",
+        "redevelopment_option_score",
+        "floor_area_ratio_missing",
+        "building_coverage_ratio_missing",
+        "avg_land_area_per_household_missing",
+        "parking_per_household_missing",
+        "bok_rate",
+        "bok_rate_change_3m",
+        "m2_yoy",
+        "usdkrw",
+        "trade_price_per_m2_lag1",
+        "trade_price_per_m2_lag3",
+        "trade_price_per_m2_lag6",
+        "trade_price_per_m2_lag12",
+        "jeonse_deposit_per_m2_lag1",
+        "jeonse_deposit_per_m2_lag3",
+        "wolse_monthly_rent_per_m2_lag1",
+        "wolse_monthly_rent_per_m2_lag3",
+        "trade_count_lag1",
+        "trade_count_lag3",
+        "jeonse_ratio_lag1",
+        "jeonse_ratio_lag3",
+        "conversion_rate_lag1",
+        "conversion_rate_lag3",
+        "trade_price_per_m2_t1",
+        "trade_price_per_m2_t3",
+        "jeonse_deposit_per_m2_t1",
+        "jeonse_deposit_per_m2_t3",
+        "wolse_monthly_rent_per_m2_t1",
+        "wolse_monthly_rent_per_m2_t3",
+        "jeonse_ratio_t1",
+        "jeonse_ratio_t3",
+        "conversion_rate_t1",
+        "conversion_rate_t3",
+        "future_trade_return_12m",
+        "future_jeonse_return_12m",
+        "future_wolse_return_12m",
     ]
 
     def __init__(
@@ -185,12 +233,12 @@ class AggregationPipeline:
             return pd.DataFrame()
         return pd.read_parquet(path)
 
-    def _write_output_parquet(self, name: str, df: pd.DataFrame) -> None:
+    def _write_output_parquet(self, name: str, df: pd.DataFrame, *, compression: str | None = None) -> None:
         """output_dir 아래 parquet를 저장한다."""
         if df.empty and len(df.columns) == 0:
             logger.warning(f"빈 데이터셋이라 저장하지 않음: {name}")
             return
-        df.to_parquet(self.output_dir / name, index=False)
+        df.to_parquet(self.output_dir / name, index=False, compression=compression)
 
     def _weighted_scope_groupby(
         self,
@@ -642,12 +690,433 @@ class AggregationPipeline:
             f"trade_anomalies={len(trade_anomalies)}"
         )
 
+    def _load_apartment_list(self) -> pd.DataFrame:
+        """단지 목록 원본을 로드한다."""
+        path = self.molit_dir / "apartment_list.parquet"
+        if not path.exists():
+            logger.warning("apartment_list.parquet 가 없어 단지 마스터 구성을 건너뜁니다.")
+            return pd.DataFrame()
+        return pd.read_parquet(path)
+
+    def build_complex_master(self) -> pd.DataFrame:
+        """단지 정적 특성 마스터 테이블을 생성한다."""
+        apt_list = self._load_apartment_list()
+        apt_info = self._read_output_parquet("apartment_info.parquet")
+        if apt_list.empty and apt_info.empty:
+            return pd.DataFrame()
+
+        if not apt_list.empty:
+            base = (
+                apt_list.sort_values("aptSeq")
+                .drop_duplicates(subset=["aptSeq"], keep="first")
+                [["aptSeq", "aptNm", "sggCd", "umdCd", "umdNm", "buildYear", "roadNm"]]
+                .rename(
+                    columns={
+                        "aptNm": "apt_name_source",
+                        "sggCd": "sigungu_code_source",
+                        "umdCd": "bjdong_code_source",
+                        "umdNm": "dong_name_source",
+                        "buildYear": "build_year_source",
+                        "roadNm": "road_name_source",
+                    }
+                )
+            )
+        else:
+            base = pd.DataFrame(columns=["aptSeq"])
+
+        master = base.merge(apt_info, on="aptSeq", how="outer")
+
+        for column in [
+            "land_area",
+            "floor_area_ratio_total_area",
+            "total_area",
+            "floor_area_ratio",
+            "building_coverage_ratio",
+            "household_count",
+            "total_parking_count",
+            "ground_floor_count",
+            "underground_floor_count",
+            "parking_per_household",
+            "avg_land_area_per_household",
+            "avg_total_area_per_household",
+            "redevelopment_option_score",
+        ]:
+            if column not in master.columns:
+                master[column] = np.nan
+
+        sigungu_series = master["sigungu_code"] if "sigungu_code" in master.columns else pd.Series(pd.NA, index=master.index)
+        bjdong_series = master["bjdong_code"] if "bjdong_code" in master.columns else pd.Series(pd.NA, index=master.index)
+        sigungu_source = (
+            master["sigungu_code_source"] if "sigungu_code_source" in master.columns else pd.Series(pd.NA, index=master.index)
+        )
+        bjdong_source = (
+            master["bjdong_code_source"] if "bjdong_code_source" in master.columns else pd.Series(pd.NA, index=master.index)
+        )
+        dong_name_source = master["dong_name_source"] if "dong_name_source" in master.columns else pd.Series(pd.NA, index=master.index)
+        master["sigungu_code"] = sigungu_series.combine_first(sigungu_source)
+        master["bjdong_code"] = bjdong_series.combine_first(bjdong_source)
+        master["dong_name"] = master["dong_name"] if "dong_name" in master.columns else dong_name_source
+        master["dong_name"] = master["dong_name"].combine_first(dong_name_source)
+        apt_name_ledger = master["apt_name_ledger"] if "apt_name_ledger" in master.columns else pd.Series(pd.NA, index=master.index)
+        apt_name_source = master["apt_name_source"] if "apt_name_source" in master.columns else pd.Series(pd.NA, index=master.index)
+        master["apt_name"] = apt_name_ledger.combine_first(apt_name_source)
+        master["build_year_source"] = pd.to_numeric(master.get("build_year_source"), errors="coerce")
+
+        if "completion_date" in master.columns:
+            master["completion_date"] = pd.to_datetime(master["completion_date"], errors="coerce")
+            master["completion_year"] = master["completion_date"].dt.year
+        else:
+            master["completion_date"] = pd.NaT
+            master["completion_year"] = np.nan
+        master["completion_year"] = master["completion_year"].fillna(master["build_year_source"])
+
+        safe_households = master["household_count"].replace(0, np.nan)
+        if "total_parking_count" in master.columns:
+            master["parking_per_household"] = master["total_parking_count"] / safe_households
+        master["avg_land_area_per_household"] = master["avg_land_area_per_household"].where(
+            master["avg_land_area_per_household"].gt(0),
+            master["land_area"] / safe_households,
+        )
+        master["avg_total_area_per_household"] = master["avg_total_area_per_household"].where(
+            master["avg_total_area_per_household"].gt(0),
+            master["total_area"] / safe_households,
+        )
+
+        road_name = master.get("road_name_source", pd.Series("", index=master.index)).fillna("").astype(str).str.strip()
+        dong_name = master.get("dong_name", pd.Series("", index=master.index)).fillna("").astype(str).str.strip()
+        apt_name = master.get("apt_name", pd.Series("", index=master.index)).fillna("").astype(str).str.strip()
+        sigungu_code = master.get("sigungu_code", pd.Series("", index=master.index)).fillna("").astype(str).str.strip()
+        master["dong_repr"] = np.where(dong_name.eq(""), np.nan, dong_name + "(" + sigungu_code + ")")
+        master["apt_name_repr"] = np.where(
+            apt_name.eq(""),
+            np.nan,
+            np.where(road_name.eq(""), apt_name + "(" + dong_name + ")", apt_name + "-" + road_name + "(" + dong_name + ")"),
+        )
+
+        master["complex_scale_bucket"] = pd.cut(
+            master["household_count"],
+            bins=[0, 300, 1000, 2000, np.inf],
+            labels=["소형", "중형", "대단지", "초대단지"],
+            right=False,
+        ).astype("string")
+        master["density_bucket"] = pd.cut(
+            master["floor_area_ratio"],
+            bins=[0, 200, 300, 400, np.inf],
+            labels=["저밀도", "중밀도", "고밀도", "초고밀도"],
+            right=False,
+        ).astype("string")
+
+        for column in [
+            "floor_area_ratio",
+            "building_coverage_ratio",
+            "avg_land_area_per_household",
+            "avg_total_area_per_household",
+            "total_parking_count",
+            "parking_per_household",
+        ]:
+            master[f"{column}_missing"] = (~master[column].gt(0)).astype(int)
+
+        current_year = pd.Timestamp.today().year
+        complex_age = current_year - master["completion_year"]
+        complex_age = complex_age.where(complex_age >= 0)
+        far_input = master["floor_area_ratio"].where(master["floor_area_ratio"].gt(0))
+        bcr_input = master["building_coverage_ratio"].where(master["building_coverage_ratio"].gt(0))
+        land_input = master["avg_land_area_per_household"].where(master["avg_land_area_per_household"].gt(0))
+        age_component = ((complex_age - 15).clip(lower=0, upper=25) / 25.0).fillna(0) * 40.0
+        far_component = ((250 - far_input).clip(lower=0, upper=250) / 250.0).fillna(0) * 25.0
+        bcr_component = ((35 - bcr_input).clip(lower=0, upper=35) / 35.0).fillna(0) * 15.0
+        land_component = ((land_input - 20).clip(lower=0, upper=40) / 40.0).fillna(0) * 20.0
+        master["redevelopment_option_score"] = (age_component + far_component + bcr_component + land_component).round(2)
+        master["feature_missing_count"] = master[
+            [
+                "floor_area_ratio_missing",
+                "building_coverage_ratio_missing",
+                "avg_land_area_per_household_missing",
+                "avg_total_area_per_household_missing",
+                "total_parking_count_missing",
+                "parking_per_household_missing",
+            ]
+        ].sum(axis=1)
+
+        output_cols = [
+            "aptSeq",
+            "apt_name",
+            "apt_name_repr",
+            "dong_name",
+            "dong_repr",
+            "address",
+            "sigungu_code",
+            "bjdong_code",
+            "completion_date",
+            "completion_year",
+            "land_area",
+            "floor_area_ratio_total_area",
+            "total_area",
+            "floor_area_ratio",
+            "building_coverage_ratio",
+            "household_count",
+            "total_parking_count",
+            "parking_per_household",
+            "avg_land_area_per_household",
+            "avg_total_area_per_household",
+            "ground_floor_count",
+            "underground_floor_count",
+            "household_count_source",
+            "floor_area_ratio_source",
+            "building_coverage_ratio_source",
+            "total_parking_count_source",
+            "parking_value_source",
+            "complex_scale_bucket",
+            "density_bucket",
+            "redevelopment_option_score",
+            "floor_area_ratio_missing",
+            "building_coverage_ratio_missing",
+            "avg_land_area_per_household_missing",
+            "avg_total_area_per_household_missing",
+            "total_parking_count_missing",
+            "parking_per_household_missing",
+            "feature_missing_count",
+        ]
+        output_cols = [column for column in output_cols if column in master.columns]
+        master = master[output_cols].sort_values("aptSeq").reset_index(drop=True)
+        self._write_output_parquet("complex_master.parquet", master)
+        return master
+
+    def build_complex_monthly_panel(
+        self,
+        complex_master: pd.DataFrame | None = None,
+        macro_monthly: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        """단지-월 결과/설명 패널을 생성한다."""
+        complex_master = complex_master if complex_master is not None else self._read_output_parquet("complex_master.parquet")
+        macro_monthly = macro_monthly if macro_monthly is not None else self._read_output_parquet("macro_monthly.parquet")
+        macro_monthly = self._filter_dashboard_window(macro_monthly, ym_col="ym")
+
+        trade = self._load_processed_chunks(
+            "apt_trade",
+            columns=["date", "aptSeq", "price", "price_std84", "area", "apt_name_repr", "dong_repr"],
+        )
+        trade = self._filter_dashboard_window(trade, date_col="date")
+        if not trade.empty:
+            trade = trade.copy()
+            trade["date"] = pd.to_datetime(trade["date"], errors="coerce")
+            trade["ym"] = trade["date"].dt.strftime("%Y%m")
+            trade["price_per_m2"] = trade["price"] / trade["area"].replace(0, np.nan)
+            trade_monthly = (
+                trade.groupby(["aptSeq", "ym"], observed=True)
+                .agg(
+                    trade_count=("price", "size"),
+                    trade_price_mean=("price", "mean"),
+                    trade_price_std84=("price_std84", "mean"),
+                    trade_price_per_m2=("price_per_m2", "mean"),
+                )
+                .reset_index()
+            )
+            trade_monthly["date"] = pd.to_datetime(trade_monthly["ym"], format="%Y%m", errors="coerce")
+        else:
+            trade_monthly = pd.DataFrame()
+
+        rent = self._load_processed_chunks(
+            "apt_rent",
+            columns=["date", "aptSeq", "deposit", "deposit_std84", "monthly_rent", "area", "rentType"],
+        )
+        rent = self._filter_dashboard_window(rent, date_col="date")
+        if not rent.empty:
+            rent = rent.copy()
+            rent["date"] = pd.to_datetime(rent["date"], errors="coerce")
+            rent["ym"] = rent["date"].dt.strftime("%Y%m")
+            if "rentType" not in rent.columns:
+                rent["rentType"] = np.where(rent["monthly_rent"].fillna(0) == 0, "전세", "월세")
+            rent["deposit_per_m2"] = rent["deposit"] / rent["area"].replace(0, np.nan)
+            rent["monthly_rent_per_m2"] = rent["monthly_rent"] / rent["area"].replace(0, np.nan)
+
+            jeonse = rent[rent["rentType"] == "전세"].copy()
+            wolse = rent[rent["rentType"] == "월세"].copy()
+
+            jeonse_monthly = (
+                jeonse.groupby(["aptSeq", "ym"], observed=True)
+                .agg(
+                    jeonse_count=("deposit", "size"),
+                    jeonse_deposit_mean=("deposit", "mean"),
+                    jeonse_deposit_std84=("deposit_std84", "mean"),
+                    jeonse_deposit_per_m2=("deposit_per_m2", "mean"),
+                )
+                .reset_index()
+            ) if not jeonse.empty else pd.DataFrame()
+            if not jeonse_monthly.empty:
+                jeonse_monthly["date"] = pd.to_datetime(jeonse_monthly["ym"], format="%Y%m", errors="coerce")
+
+            wolse_monthly = (
+                wolse.groupby(["aptSeq", "ym"], observed=True)
+                .agg(
+                    wolse_count=("deposit", "size"),
+                    wolse_deposit_mean=("deposit", "mean"),
+                    wolse_monthly_rent_mean=("monthly_rent", "mean"),
+                    wolse_monthly_rent_per_m2=("monthly_rent_per_m2", "mean"),
+                )
+                .reset_index()
+            ) if not wolse.empty else pd.DataFrame()
+            if not wolse_monthly.empty:
+                wolse_monthly["date"] = pd.to_datetime(wolse_monthly["ym"], format="%Y%m", errors="coerce")
+        else:
+            jeonse_monthly = pd.DataFrame()
+            wolse_monthly = pd.DataFrame()
+
+        panel = trade_monthly.copy()
+        for monthly_df in [jeonse_monthly, wolse_monthly]:
+            if monthly_df.empty:
+                continue
+            if panel.empty:
+                panel = monthly_df.copy()
+            else:
+                panel = panel.merge(monthly_df, on=["aptSeq", "ym", "date"], how="outer")
+
+        if panel.empty:
+            return panel
+
+        if not complex_master.empty:
+            panel = panel.merge(complex_master, on="aptSeq", how="left")
+
+        for column in [
+            "trade_count",
+            "trade_price_mean",
+            "trade_price_std84",
+            "trade_price_per_m2",
+            "jeonse_count",
+            "jeonse_deposit_mean",
+            "jeonse_deposit_std84",
+            "jeonse_deposit_per_m2",
+            "wolse_count",
+            "wolse_deposit_mean",
+            "wolse_monthly_rent_mean",
+            "wolse_monthly_rent_per_m2",
+            "household_count",
+            "avg_land_area_per_household",
+            "completion_year",
+        ]:
+            if column not in panel.columns:
+                panel[column] = np.nan
+
+        panel["date"] = pd.to_datetime(panel["date"], errors="coerce")
+        panel["year"] = panel["date"].dt.year
+        panel["month"] = panel["date"].dt.month
+        panel["completion_year"] = pd.to_numeric(panel["completion_year"], errors="coerce")
+        panel["complex_age"] = panel["year"] - panel["completion_year"]
+        panel.loc[panel["complex_age"] < 0, "complex_age"] = np.nan
+        panel["jeonse_ratio"] = (panel["jeonse_deposit_std84"] / panel["trade_price_std84"]) * 100
+        panel["deposit_gap"] = panel["jeonse_deposit_mean"] - panel["wolse_deposit_mean"]
+        panel["conversion_rate"] = (panel["wolse_monthly_rent_mean"] * 12 / panel["deposit_gap"]) * 100
+        panel.loc[panel["deposit_gap"] <= 0, "conversion_rate"] = np.nan
+        trade_count = panel["trade_count"] if "trade_count" in panel.columns else pd.Series(0, index=panel.index, dtype="float64")
+        household_count = panel["household_count"] if "household_count" in panel.columns else pd.Series(np.nan, index=panel.index, dtype="float64")
+        land_share = panel["avg_land_area_per_household"] if "avg_land_area_per_household" in panel.columns else pd.Series(np.nan, index=panel.index, dtype="float64")
+        price_std84 = panel["trade_price_std84"] if "trade_price_std84" in panel.columns else pd.Series(np.nan, index=panel.index, dtype="float64")
+        panel["trade_occurrence"] = trade_count.fillna(0).gt(0).astype(int)
+        panel["turnover_rate"] = trade_count / household_count.replace(0, np.nan)
+        panel["land_value_proxy_per_py"] = price_std84 / (land_share / 3.3058)
+
+        for column in [
+            "trade_price_per_m2",
+            "trade_price_std84",
+            "jeonse_deposit_per_m2",
+            "jeonse_deposit_std84",
+            "wolse_monthly_rent_per_m2",
+            "jeonse_ratio",
+            "conversion_rate",
+        ]:
+            if column in panel.columns:
+                panel[f"{column}_yoy"] = panel.groupby("aptSeq", observed=True)[column].pct_change(12, fill_method=None) * 100
+
+        if not macro_monthly.empty:
+            macro_features = macro_monthly.copy()
+            if "bok_rate" in macro_features.columns:
+                macro_features["bok_rate_change_3m"] = macro_features["bok_rate"].diff(3)
+            if "m2" in macro_features.columns:
+                macro_features["m2_yoy"] = macro_features["m2"].pct_change(12) * 100
+            panel = panel.merge(macro_features, on=["ym", "date"], how="left")
+
+        panel = panel.sort_values(["aptSeq", "date"]).reset_index(drop=True)
+        self._write_output_parquet("complex_monthly_panel.parquet", panel)
+        return panel
+
+    def build_complex_forecast_targets(self, complex_panel: pd.DataFrame | None = None) -> pd.DataFrame:
+        """단지 예측용 타깃/래그 패널을 생성한다."""
+        complex_panel = complex_panel if complex_panel is not None else self._read_output_parquet("complex_monthly_panel.parquet")
+        if complex_panel.empty:
+            return pd.DataFrame()
+
+        panel = complex_panel.sort_values(["aptSeq", "date"]).copy()
+        lag_columns = [
+            "trade_price_per_m2",
+            "trade_price_std84",
+            "jeonse_deposit_per_m2",
+            "jeonse_deposit_std84",
+            "wolse_monthly_rent_per_m2",
+            "trade_count",
+            "jeonse_ratio",
+            "conversion_rate",
+        ]
+        lag_columns = [column for column in lag_columns if column in panel.columns]
+
+        grouped = panel.groupby("aptSeq", observed=True)
+        for lag in [1, 3, 6, 12]:
+            for column in lag_columns:
+                panel[f"{column}_lag{lag}"] = grouped[column].shift(lag)
+
+        short_term_targets = {
+            "trade_price_per_m2": [1, 3],
+            "trade_price_std84": [1, 3],
+            "jeonse_deposit_per_m2": [1, 3],
+            "jeonse_deposit_std84": [1, 3],
+            "wolse_monthly_rent_per_m2": [1, 3],
+            "jeonse_ratio": [1, 3],
+            "conversion_rate": [1, 3],
+        }
+        for column, horizons in short_term_targets.items():
+            if column not in panel.columns:
+                continue
+            for horizon in horizons:
+                panel[f"{column}_t{horizon}"] = grouped[column].shift(-horizon)
+
+        for base_col, target_col in [
+            ("trade_price_per_m2", "future_trade_return_12m"),
+            ("jeonse_deposit_per_m2", "future_jeonse_return_12m"),
+            ("wolse_monthly_rent_per_m2", "future_wolse_return_12m"),
+        ]:
+            if base_col in panel.columns:
+                future = grouped[base_col].shift(-12)
+                panel[target_col] = (future / panel[base_col] - 1) * 100
+
+        panel = panel.sort_values(["aptSeq", "date"]).reset_index(drop=True)
+        keep_columns = [column for column in self.COMPLEX_FORECAST_TARGET_COLUMNS if column in panel.columns]
+        panel = panel[keep_columns].copy()
+        for column in panel.select_dtypes(include=["float64"]).columns:
+            panel[column] = panel[column].astype("float32")
+        self._write_output_parquet("complex_forecast_targets.parquet", panel, compression="zstd")
+        return panel
+
+    def build_representative_datasets(
+        self,
+        complex_master: pd.DataFrame | None = None,
+        macro_monthly: pd.DataFrame | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """59형/84형 대표단지 분석용 선계산 parquet를 생성한다."""
+        pipeline = RepresentativeComplexPipeline(output_dir=self.output_dir)
+        return pipeline.run_all(
+            complex_master=complex_master if complex_master is not None else self._read_output_parquet("complex_master.parquet"),
+            macro_monthly=macro_monthly if macro_monthly is not None else self._read_output_parquet("macro_monthly.parquet"),
+        )
+
     def run_all(self) -> None:
         """매매 집계, 전월세 집계, 거시지표 통합, 대시보드 데이터셋 생성을 순차 실행한다."""
         trade_summary = self.build_monthly_trade_summary()
         rent_summary = self.build_monthly_rent_summary()
         macro_monthly = self.build_macro_monthly()
         self.build_dashboard_datasets(trade_summary, rent_summary, macro_monthly)
+        complex_master = self.build_complex_master()
+        complex_panel = self.build_complex_monthly_panel(complex_master=complex_master, macro_monthly=macro_monthly)
+        self.build_complex_forecast_targets(complex_panel)
+        self.build_representative_datasets(complex_master=complex_master, macro_monthly=macro_monthly)
         logger.info("전체 집계 파이프라인 완료")
 
 

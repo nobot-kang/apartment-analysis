@@ -84,6 +84,15 @@ DASHBOARD_CONVERSION_RATE_PATH = PROCESSED_DIR / "dashboard_conversion_rate_mont
 DASHBOARD_DISTRICT_YEAR_METRICS_PATH = PROCESSED_DIR / "dashboard_district_year_metrics.parquet"
 DASHBOARD_CYCLE_FEATURES_PATH = PROCESSED_DIR / "dashboard_cycle_features.parquet"
 DASHBOARD_TRADE_ANOMALIES_PATH = PROCESSED_DIR / "dashboard_trade_anomalies.parquet"
+COMPLEX_MASTER_PATH = PROCESSED_DIR / "complex_master.parquet"
+COMPLEX_MONTHLY_PANEL_PATH = PROCESSED_DIR / "complex_monthly_panel.parquet"
+COMPLEX_FORECAST_TARGETS_PATH = PROCESSED_DIR / "complex_forecast_targets.parquet"
+REPRESENTATIVE_COMPLEX_UNIVERSE_PATH = PROCESSED_DIR / "representative_complex_universe.parquet"
+REPRESENTATIVE_TRADE_BAND_MONTHLY_PATH = PROCESSED_DIR / "representative_trade_band_monthly.parquet"
+REPRESENTATIVE_RENT_BAND_MONTHLY_PATH = PROCESSED_DIR / "representative_rent_band_monthly.parquet"
+REPRESENTATIVE_PAIR_GAP_MONTHLY_PATH = PROCESSED_DIR / "representative_pair_gap_monthly.parquet"
+REPRESENTATIVE_REGION_MONTHLY_PATH = PROCESSED_DIR / "representative_region_monthly.parquet"
+REPRESENTATIVE_FORECAST_TARGETS_PATH = PROCESSED_DIR / "representative_forecast_targets.parquet"
 
 
 def optional_import(module_name: str):
@@ -488,6 +497,55 @@ def load_apartment_info_df() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     return pd.read_parquet(path)
+
+
+def load_complex_master_df() -> pd.DataFrame:
+    """단지 정적 특성 마스터를 로드한다."""
+    if not COMPLEX_MASTER_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(COMPLEX_MASTER_PATH)
+
+
+def load_complex_monthly_panel_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """단지-월 패널 데이터를 로드한다."""
+    return _read_dashboard_table(COMPLEX_MONTHLY_PANEL_PATH, start_ym=start_ym)
+
+
+def load_complex_forecast_targets_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """단지 예측용 타깃/래그 패널을 로드한다."""
+    return _read_dashboard_table(COMPLEX_FORECAST_TARGETS_PATH, start_ym=start_ym)
+
+
+def load_representative_complex_universe_df() -> pd.DataFrame:
+    """Load the representative-complex lookup table."""
+    if not REPRESENTATIVE_COMPLEX_UNIVERSE_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(REPRESENTATIVE_COMPLEX_UNIVERSE_PATH).reset_index(drop=True)
+
+
+def load_representative_trade_band_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative trade band monthly panel."""
+    return _read_dashboard_table(REPRESENTATIVE_TRADE_BAND_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_rent_band_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative rent band monthly panel."""
+    return _read_dashboard_table(REPRESENTATIVE_RENT_BAND_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_pair_gap_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative pair-gap monthly panel."""
+    return _read_dashboard_table(REPRESENTATIVE_PAIR_GAP_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_region_monthly_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative region monthly aggregates."""
+    return _read_dashboard_table(REPRESENTATIVE_REGION_MONTHLY_PATH, start_ym=start_ym)
+
+
+def load_representative_forecast_targets_df(start_ym: str | None = ANALYSIS_START_YM) -> pd.DataFrame:
+    """Load the representative forecast target panel."""
+    return _read_dashboard_table(REPRESENTATIVE_FORECAST_TARGETS_PATH, start_ym=start_ym)
 
 
 def load_trade_detail_df(
