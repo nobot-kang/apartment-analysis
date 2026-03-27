@@ -20,6 +20,9 @@ dependencies = [
     "statsmodels>=0.14.0",
     "tqdm>=4.66.1",
     "loguru>=0.7.2",
+    "matplotlib>=3.10.8",
+    "seaborn>=0.13.2",
+    "ipykernel>=7.2.0",
 ]
 
 [project.optional-dependencies]
