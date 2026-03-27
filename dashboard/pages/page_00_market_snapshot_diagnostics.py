@@ -429,7 +429,7 @@ def _render_a3(outliers_df: pd.DataFrame, selected_code: str) -> None:
 # 메인 render
 # ---------------------------------------------------------------------------
 
-def render() -> None:
+def render_snapshot() -> None:
     """시장 스냅샷 페이지를 렌더링한다."""
     st.header("A. 데이터 진단 & 시장 스냅샷")
     st.markdown(

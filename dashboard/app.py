@@ -6,6 +6,7 @@ import importlib
 import sys
 from pathlib import Path
 from time import perf_counter
+from typing import Callable
 
 import streamlit as st
 from loguru import logger
@@ -16,6 +17,7 @@ if str(_project_root) not in sys.path:
 
 NAVIGATION = {
     "📍 시장 한눈에 보기": {
+        "데이터 진단 & 시장 스냅샷": ("dashboard.pages.page_00_market_snapshot_diagnostics", "render_snapshot"),
         "거래량과 가격 흐름": ("dashboard.pages.page_01_overview", "render_volume"),
         "지역별 가격 순위": ("dashboard.pages.page_01_overview", "render_ranking"),
         "순위 변화 애니메이션": ("dashboard.pages.page_01_overview", "render_ranking_animation"),
@@ -102,15 +104,18 @@ NAVIGATION = {
         "관심 지역·단지 순위 스크리닝": ("dashboard.pages.page_13_representative_forecast", "render_representative_screening"),
         "경기 변화 시나리오 시뮬레이션": ("dashboard.pages.page_13_representative_forecast", "render_representative_scenario"),
     },
+    
 }
 
 
-def _resolve_renderer(module_name: str, function_name: str):
+def _resolve_renderer(module_name: str, function_name: str) -> Callable[[], None]:
+    """Dynamically resolve the selected dashboard renderer function."""
     module = importlib.import_module(module_name)
     return getattr(module, function_name)
 
 
 def main() -> None:
+    """Run the Streamlit dashboard application."""
     st.set_page_config(
         page_title="부동산 시계열 분석 대시보드",
         page_icon="🏠",
