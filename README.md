@@ -4,9 +4,9 @@
 
 ## 데이터 소스
 
-- **국토교통부 실거래가 Open API** – 아파트 매매/전월세 실거래가
-- **한국은행 ECOS API** – 기준금리, CPI, M2
-- **yfinance** – 금, 유가, 원달러 환율
+- **국토교통부 실거래가 Open API** - 아파트 매매/전월세 실거래가
+- **한국은행 ECOS API** - 기준금리, CPI, M2
+- **yfinance** - 금, 유가, 원달러 환율
 
 ## 분석 기간
 
@@ -17,6 +17,13 @@
 - 서울특별시 25개 자치구 전체
 - 경기도 주요 19개 시·군
 
+## 의존성 관리 원칙
+
+- 단일 소스: `pyproject.toml`
+- `requirements.txt` 는 유지하지 않음
+- 기본 설치: `uv sync`
+- 고급 패키지까지 설치: `uv sync --extra advanced`
+
 ## 로컬 실행 방법
 
 ```bash
@@ -24,21 +31,28 @@
 git clone https://github.com/<your-username>/apartment-analysis.git
 cd apartment-analysis
 
-# 2. 가상환경 생성 및 의존성 설치 (uv 사용)
-uv venv
-.venv\Scripts\activate   # Windows
-# source .venv/bin/activate  # macOS/Linux
-uv pip install -r requirements.txt
+# 2. Python 3.11 준비 + 가상환경 생성
+uv python install 3.11
+uv venv --python 3.11
 
-# 3. API 키 설정
+# 3. 기본 의존성 동기화
+uv sync
+
+# 고급 분석용 optional 패키지까지 설치하려면
+# uv sync --extra advanced
+
+# 4. API 키 설정
 cp .env.example .env
 # .env 파일을 열어 실제 API 키 입력
 
-# 4. 데이터 수집 (첫 실행 시 전체 수집)
-python scripts/run_full_pipeline.py
+# 5. 데이터 수집
+uv run python scripts/run_full_pipeline.py
 
-# 5. 대시보드 실행
-streamlit run streamlit_app.py
+# 6. 집계만 다시 만들기
+uv run python scripts/build_summary.py
+
+# 7. 대시보드 실행
+uv run streamlit run streamlit_app.py
 ```
 
 ## API 키 발급
