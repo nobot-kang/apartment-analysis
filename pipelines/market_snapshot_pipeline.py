@@ -37,13 +37,24 @@ AREA_BUCKETS = [
     (102, 9999, "102㎡~"),
 ]
 
-# 이상치 탐지: 직전 시세 대비 편차 임계값 (25%)
+# 이상치 탐지: moving average band 의 최소 상대 폭
 OUTLIER_THRESHOLD: float = 0.25
 # 시세 조회 최대 소급 개월 수
 LOOKBACK_MONTHS: int = 6
-# 사전 필터: 동일 단지·면적 내 시간순 직전 거래 대비 등락 임계값 (25%)
-# 이 임계값을 초과하는 거래는 시세 계산·이상치 탐지 양쪽에서 모두 제외
-CONSECUTIVE_THRESHOLD: float = 0.25
+# Bollinger band 파라미터
+BOLLINGER_WINDOW_MONTHS: int = 6
+BOLLINGER_MIN_HISTORY_MONTHS: int = 3
+BOLLINGER_STD_MULTIPLIER: float = 2.0
+# 급격한 가격 이동이 추세 전환인지 확인하는 파라미터
+TREND_LOOKAHEAD_MONTHS: int = 6
+TREND_MIN_SUPPORT_MONTHS: int = 2
+TREND_MIN_TOTAL_TRADES: int = 3
+TREND_SUPPORT_BAND_RATIO: float = 0.5
+TREND_ALIGNMENT_TOLERANCE: float = 0.12
+# 추세 전환으로 인정된 월 안에서 개별 행을 다시 점검할 때 쓰는 band
+TREND_ROW_MIN_TRADE_COUNT: int = 3
+TREND_ROW_STD_MULTIPLIER: float = 2.5
+TREND_ROW_MIN_BAND_PCT: float = 0.08
 
 
 def _load_all_trade(processed_dir: Path) -> pd.DataFrame:
@@ -179,26 +190,16 @@ def build_snapshot_monthly_trade(trade_df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(rows).sort_values(["sggCd", "month"]).reset_index(drop=True)
     result["month"] = pd.to_datetime(result["month"])
 
-    # Rolling 이동평균 (전체 집계 기준)
-    all_monthly = result[result["sggCd"] == "ALL"].set_index("month")["price_median_m2"]
-    rolling_map = {}
-    for window, col in [(3, "rolling_3m_median_m2"), (6, "rolling_6m_median_m2"), (12, "rolling_12m_median_m2")]:
-        roll = all_monthly.sort_index().rolling(window, min_periods=1).mean()
-        rolling_map[col] = roll
-
-    def _get_rolling(month: pd.Timestamp, col: str) -> float:
-        s = rolling_map[col]
-        return float(s.loc[month]) if month in s.index else np.nan
-
-    result["rolling_3m_median_m2"] = result["month"].map(
-        lambda m: _get_rolling(m, "rolling_3m_median_m2")
-    )
-    result["rolling_6m_median_m2"] = result["month"].map(
-        lambda m: _get_rolling(m, "rolling_6m_median_m2")
-    )
-    result["rolling_12m_median_m2"] = result["month"].map(
-        lambda m: _get_rolling(m, "rolling_12m_median_m2")
-    )
+    # Rolling 이동평균 (지역별 시계열 기준)
+    for window, col in [
+        (3, "rolling_3m_median_m2"),
+        (6, "rolling_6m_median_m2"),
+        (12, "rolling_12m_median_m2"),
+    ]:
+        result[col] = (
+            result.groupby("sggCd", sort=False)["price_median_m2"]
+            .transform(lambda s: s.rolling(window, min_periods=1).mean())
+        )
 
     return result
 
@@ -340,272 +341,291 @@ def build_snapshot_area_mix(trade_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# A-3: 이상치·오류·비정상 거래 탐지 (단지·면적 기준, 시세 대비 ±20%)
+# A-3: 이상치·오류·비정상 거래 탐지
 # ---------------------------------------------------------------------------
 
-def build_snapshot_outliers(
-    trade_df: pd.DataFrame,
-    n_iterations: int = 5,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """A-3용 이상치 탐지 및 단지별 월별 시세 테이블을 생성한다.
-
-    탐지 기준:
-        그룹 단위 : aptSeq × area_repr (같은 단지 내 floor(전용면적) 동일)
-        참조 시세 : 해당 거래월 직전 최대 6개월 이내 가장 최근 월의 중앙값
-        이상치 조건: |거래가 - 참조 시세| / 참조 시세 > 20%
-        참조 없음  : 직전 6개월 내 거래 이력 없으면 탐지 생략
-        1층 거래   : 시세 계산 및 이상치 탐지 모두 제외
-
-    알고리즘 (양방향 반복 수렴):
-        1. 1층 거래 제외
-        2. n_iterations 회 반복:
-           a. 현재 이상치 집합을 제외한 거래로 월별 중앙값(ref_price) 계산
-              → 이상치가 복원되면 다음 반복에서 중앙값에 즉시 반영
-           b. merge_asof 로 전체 거래(이상치 포함)에 ref_price 매핑
-              (당월 제외, 최대 6개월 소급)
-           c. ±20% 초과 → 새 이상치 집합 산출 (양방향: 추가 + 복원 모두 반영)
-           d. 이상치 집합이 변화 없으면 조기 수렴 종료
-        3. 최종 이상치 완전 제외 후 클린 시세(market_price_df) 산출
-        4. 클린 시세로 최종 merge_asof 재수행 → 이상치 출력의 ref_price를
-           가장 정제된 기준으로 업데이트
-
-    Args:
-        trade_df    : 공통 전처리가 완료된 매매 DataFrame
-        n_iterations: 최대 반복 횟수 (기본 5회, 통상 3~4회차에 수렴)
-
-    Returns:
-        outliers_df     : 이상치로 분류된 거래 행 + 탐지 메타 컬럼
-                          (ref_price·price_deviation_pct 은 최종 클린 시세 기준)
-        market_price_df : 이상치 제외 최종 단지·면적별 월별 시세 (만원/㎡)
-    """
-    logger.info(
-        f"A-3 이상치 탐지 시작 (단지·면적 기준, ±{OUTLIER_THRESHOLD*100:.0f}%, "
-        f"최대 {n_iterations}회 반복)..."
-    )
-
-    df = (
-        trade_df
-        .dropna(subset=["date", "price_per_m2", "area_repr"])
-        .copy()
-    )
-    df["month"] = pd.to_datetime(df["month"])
-
-    # ------------------------------------------------------------------
-    # 사전 필터 ① 1층 거래 제외 – 저가 경향이 강해 시세 기준에서 제외
-    # ------------------------------------------------------------------
-    floor_numeric = pd.to_numeric(df["floor"], errors="coerce")
-    n_before = len(df)
-    df = df[floor_numeric != 1].reset_index(drop=True)
-    logger.info(
-        f"  사전 필터 ① 1층 거래 제외: {n_before - len(df):,}건 → {len(df):,}건"
-    )
-
-    # ------------------------------------------------------------------
-    # 사전 필터 ② 직전 유효 거래 대비 30% 초과 등락 거래 제외 (순차 비교)
-    #   - 그룹: (aptSeq, area_repr), 정렬 기준: date (시간순)
-    #   - 이상 거래가 제거되면 last_valid_price 를 갱신하지 않고
-    #     다음 거래는 그 이전 유효 거래와 비교 → 연쇄 제거 방지
-    #     예) A(100) → B(200, 제거) → C(110): C 는 A 기준 +10% → 유지
-    # ------------------------------------------------------------------
-    def _sequential_consec_mask(prices: np.ndarray, threshold: float) -> np.ndarray:
-        """시간순 정렬된 price_per_m2 배열에서 연쇄 제거 없이 이상 거래를 마킹."""
-        mask = np.zeros(len(prices), dtype=bool)
-        if len(prices) == 0:
-            return mask
-        last_valid = float(prices[0])
-        for i in range(1, len(prices)):
-            p = float(prices[i])
-            if last_valid <= 0:
-                # 유효하지 않은 기준가 → 현재 거래로 기준 교체
-                last_valid = p
-                continue
-            if abs(p - last_valid) / last_valid > threshold:
-                mask[i] = True          # 이상 거래 마킹, last_valid 갱신 안 함
-            else:
-                last_valid = p          # 정상 거래 → 다음 비교 기준 갱신
-        return mask
-
-    df_tmp = df.sort_values(["aptSeq", "area_repr", "date"])
-    consec_exclude_mask = (
-        df_tmp
-        .groupby(["aptSeq", "area_repr"], group_keys=False)[["price_per_m2"]]
-        .apply(
-            lambda g: pd.Series(
-                _sequential_consec_mask(g["price_per_m2"].values, CONSECUTIVE_THRESHOLD),
-                index=g.index,
-            )
+def _compute_monthly_band_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """단지×면적×월 대표가격과 moving-average band 를 계산한다."""
+    group_cols = ["aptSeq", "area_repr", "month"]
+    monthly = (
+        df.groupby(group_cols, observed=True, sort=True)["price_per_m2"]
+        .agg(
+            month_price_m2="median",
+            month_trade_count="size",
+            month_price_std_m2=lambda s: float(s.std(ddof=0)) if len(s) > 1 else 0.0,
+            month_price_mad_m2=lambda s: float((s - s.median()).abs().median()),
         )
-        .squeeze()
-    )
-    consec_exclude_idx = consec_exclude_mask[consec_exclude_mask].index
-
-    n_before = len(df)
-    df = df.drop(index=consec_exclude_idx).reset_index(drop=True)
-    logger.info(
-        f"  사전 필터 ② 연속 등락 {CONSECUTIVE_THRESHOLD*100:.0f}% 초과 제외 (순차): "
-        f"{n_before - len(df):,}건 → {len(df):,}건"
-    )
-
-    # 원본 행 위치를 반복 간 추적하기 위한 컬럼
-    df["_orig_idx"] = range(len(df))
-
-    tolerance = pd.Timedelta(days=LOOKBACK_MONTHS * 31)
-
-    # 이상치 마스크 초기화 (첫 반복은 이상치 없음 → 전체 거래로 중앙값 계산)
-    is_outlier = pd.Series(False, index=range(len(df)), dtype=bool)
-
-    for iteration in range(n_iterations):
-        # ------------------------------------------------------------------
-        # Step a: 현재 이상치 집합을 제외한 클린 거래로 월별 평균값(이동평균) 계산
-        #   - 이전 반복에서 복원된 거래(이상치 → 정상)도 여기서 평균값에 반영됨
-        # ------------------------------------------------------------------
-        monthly_med = (
-            df[~is_outlier]
-            .groupby(["aptSeq", "area_repr", "month"])["price_per_m2"]
-            .mean()
-            .reset_index()
-            .rename(columns={"price_per_m2": "ref_price", "month": "ref_month"})
-        )
-        monthly_med["ref_month"] = pd.to_datetime(monthly_med["ref_month"])
-        monthly_med = monthly_med.sort_values("ref_month").reset_index(drop=True)
-
-        # ------------------------------------------------------------------
-        # Step b: 전체 거래(이상치 포함)에 ref_price 매핑
-        #   _key = month - 1초: 당월 중앙값을 참조에서 배제
-        #   이상치 거래도 포함하여 매핑 → 복원 여부 판단 가능
-        # ------------------------------------------------------------------
-        df_sorted = df.sort_values("month").copy()
-        df_sorted["_key"] = df_sorted["month"] - pd.Timedelta(seconds=1)
-
-        merged = pd.merge_asof(
-            df_sorted,
-            monthly_med,
-            left_on="_key",
-            right_on="ref_month",
-            by=["aptSeq", "area_repr"],
-            direction="backward",
-            tolerance=tolerance,
-        )
-        merged.drop(columns=["_key"], inplace=True)
-
-        # ------------------------------------------------------------------
-        # Step c: 새 이상치 집합 산출 (양방향)
-        #   - 기존 이상치 중 ±20% 이내로 복귀한 거래 → 복원
-        #   - 기존 정상 거래 중 ±20% 초과로 변한 거래 → 신규 편입
-        # ------------------------------------------------------------------
-        has_ref = merged["ref_price"].notna()
-        merged["price_deviation_pct"] = np.where(
-            has_ref,
-            (merged["price_per_m2"] - merged["ref_price"]) / merged["ref_price"] * 100,
-            np.nan,
-        )
-        new_outlier_flag = has_ref & (
-            merged["price_deviation_pct"].abs() > OUTLIER_THRESHOLD * 100
-        )
-
-        # _orig_idx 기준으로 이상치 마스크 재구성 (전체 교체 → 복원 자동 반영)
-        outlier_orig_idx = set(merged.loc[new_outlier_flag, "_orig_idx"].values)
-        new_is_outlier = pd.Series(
-            [idx in outlier_orig_idx for idx in range(len(df))],
-            dtype=bool,
-        )
-
-        # 양방향 변화량 로깅
-        prev_set = set(df.index[is_outlier])
-        new_set  = set(df.index[new_is_outlier])
-        added    = len(new_set - prev_set)
-        restored = len(prev_set - new_set)
-        logger.info(
-            f"  반복 {iteration + 1}/{n_iterations}: "
-            f"총 {int(is_outlier.sum()):,} → {int(new_is_outlier.sum()):,}건 "
-            f"(+{added:,} 추가 / -{restored:,} 복원)"
-        )
-
-        # ------------------------------------------------------------------
-        # Step d: 수렴 확인 후 이상치 집합 교체
-        # ------------------------------------------------------------------
-        converged = new_is_outlier.equals(is_outlier)
-        is_outlier = new_is_outlier   # 복원된 거래는 다음 반복 중앙값에 반영됨
-
-        if converged:
-            logger.info(f"  ✓ 수렴: {iteration + 1}회 반복 후 종료")
-            break
-
-    # ------------------------------------------------------------------
-    # 최종 클린 시세 – 수렴된 이상치 완전 제외 후 재계산
-    # ------------------------------------------------------------------
-    logger.info("  최종 시세 계산 (수렴된 이상치 완전 제외, 월별 평균값)...")
-    market_price_df = (
-        df[~is_outlier]
-        .groupby(["aptSeq", "area_repr", "month"])["price_per_m2"]
-        .mean()
         .reset_index()
-        .rename(columns={"price_per_m2": "market_price_m2"})
-    )
-    market_price_df["month"] = pd.to_datetime(market_price_df["month"])
-
-    # ------------------------------------------------------------------
-    # 이상치 출력용 ref_price 최종 갱신
-    #   반복 중 사용한 중간 중앙값이 아니라, 완전히 정제된 market_price_df 로
-    #   이상치 거래의 ref_price · price_deviation_pct 를 재계산한다.
-    # ------------------------------------------------------------------
-    logger.info("  이상치 ref_price 최종 갱신 (클린 시세 기준)...")
-    clean_ref = (
-        market_price_df
-        .rename(columns={"market_price_m2": "ref_price", "month": "ref_month"})
-        .sort_values("ref_month")
-    )
-
-    outlier_rows = df[is_outlier].sort_values("month").copy()
-    outlier_rows["_key"] = outlier_rows["month"] - pd.Timedelta(seconds=1)
-
-    outlier_with_final_ref = pd.merge_asof(
-        outlier_rows,
-        clean_ref,
-        left_on="_key",
-        right_on="ref_month",
-        by=["aptSeq", "area_repr"],
-        direction="backward",
-        tolerance=tolerance,
-    )
-    outlier_with_final_ref.drop(columns=["_key"], inplace=True)
-
-    # 최종 클린 시세 기준 편차 재계산
-    has_final_ref = outlier_with_final_ref["ref_price"].notna()
-    outlier_with_final_ref["price_deviation_pct"] = np.where(
-        has_final_ref,
-        (outlier_with_final_ref["price_per_m2"] - outlier_with_final_ref["ref_price"])
-        / outlier_with_final_ref["ref_price"] * 100,
-        np.nan,
-    )
-    outlier_with_final_ref["outlier_direction"] = np.where(
-        outlier_with_final_ref["price_deviation_pct"] > 0, "고가이상치", "저가이상치"
-    )
-
-    keep_cols = [
-        "month", "date",
-        "aptSeq", "apt_name", "dong", "dong_repr",
-        "area", "area_repr", "floor", "construction_year", "age",
-        "price", "price_per_m2",
-        "ref_month", "ref_price", "price_deviation_pct", "outlier_direction",
-    ]
-    keep_cols = [c for c in keep_cols if c in outlier_with_final_ref.columns]
-
-    outliers_df = (
-        outlier_with_final_ref[keep_cols]
-        .sort_values(["aptSeq", "area_repr", "month"])
+        .sort_values(group_cols)
         .reset_index(drop=True)
     )
 
-    # 임시 컬럼 정리
-    df.drop(columns=["_orig_idx"], inplace=True)
+    group_keys = ["aptSeq", "area_repr"]
+    monthly["_month_ord"] = monthly["month"].dt.year * 12 + monthly["month"].dt.month
+    monthly["lag_price"] = monthly.groupby(group_keys, sort=False)["month_price_m2"].shift(1)
+    monthly["ref_price"] = monthly.groupby(group_keys, sort=False)["lag_price"].transform(
+        lambda s: s.rolling(BOLLINGER_WINDOW_MONTHS, min_periods=BOLLINGER_MIN_HISTORY_MONTHS).mean()
+    )
+    monthly["rolling_std_m2"] = monthly.groupby(group_keys, sort=False)["lag_price"].transform(
+        lambda s: s.rolling(BOLLINGER_WINDOW_MONTHS, min_periods=BOLLINGER_MIN_HISTORY_MONTHS).std(ddof=0)
+    )
+    monthly["ref_month"] = monthly.groupby(group_keys, sort=False)["month"].shift(1)
+    monthly["ref_month_ord"] = monthly.groupby(group_keys, sort=False)["_month_ord"].shift(1)
+    monthly["ref_gap_months"] = monthly["_month_ord"] - monthly["ref_month_ord"]
 
-    n_total   = len(df)
+    stale_ref = monthly["ref_gap_months"] > LOOKBACK_MONTHS
+    monthly.loc[stale_ref, "ref_price"] = np.nan
+    monthly.loc[stale_ref, "rolling_std_m2"] = np.nan
+    monthly.loc[stale_ref, "ref_month"] = pd.NaT
+
+    monthly["month_price_std_m2"] = monthly["month_price_std_m2"].fillna(0.0)
+    monthly["month_price_mad_m2"] = monthly["month_price_mad_m2"].fillna(0.0)
+    monthly["month_robust_sigma_m2"] = monthly["month_price_mad_m2"] * 1.4826
+    monthly["month_row_band_abs"] = np.maximum(
+        monthly["month_robust_sigma_m2"] * TREND_ROW_STD_MULTIPLIER,
+        monthly["month_price_m2"] * TREND_ROW_MIN_BAND_PCT,
+    )
+
+    band_candidate = np.maximum(
+        monthly["rolling_std_m2"].fillna(0.0) * BOLLINGER_STD_MULTIPLIER,
+        monthly["ref_price"] * OUTLIER_THRESHOLD,
+    )
+    monthly["band_width_abs"] = np.where(monthly["ref_price"].notna(), band_candidate, np.nan)
+    monthly["band_lower"] = monthly["ref_price"] - monthly["band_width_abs"]
+    monthly["band_upper"] = monthly["ref_price"] + monthly["band_width_abs"]
+    monthly["band_width_pct"] = np.where(
+        monthly["ref_price"] > 0,
+        monthly["band_width_abs"] / monthly["ref_price"] * 100,
+        np.nan,
+    )
+
+    monthly["candidate_direction"] = 0
+    monthly.loc[
+        monthly["ref_price"].notna() & monthly["month_price_m2"].gt(monthly["band_upper"]),
+        "candidate_direction",
+    ] = 1
+    monthly.loc[
+        monthly["ref_price"].notna() & monthly["month_price_m2"].lt(monthly["band_lower"]),
+        "candidate_direction",
+    ] = -1
+    return monthly
+
+
+def _annotate_trend_confirmation(monthly: pd.DataFrame) -> pd.DataFrame:
+    """후행 거래가 이어지는 breakout 월을 추세 전환으로 태깅한다."""
+    monthly = monthly.copy()
+    trend_confirmed = np.zeros(len(monthly), dtype=bool)
+    trend_support_months = np.zeros(len(monthly), dtype=np.int16)
+    trend_total_trades = np.zeros(len(monthly), dtype=np.int32)
+    trend_ref_price = np.full(len(monthly), np.nan, dtype=float)
+
+    group_indices = monthly.groupby(["aptSeq", "area_repr"], sort=False).indices
+
+    for idx in tqdm(group_indices.values(), desc="Confirming trend shifts"):
+        group_idx = np.asarray(idx)
+        if group_idx.size <= BOLLINGER_MIN_HISTORY_MONTHS:
+            continue
+
+        months_ord = monthly.loc[group_idx, "_month_ord"].to_numpy(dtype=int)
+        prices = monthly.loc[group_idx, "month_price_m2"].to_numpy(dtype=float)
+        refs = monthly.loc[group_idx, "ref_price"].to_numpy(dtype=float)
+        bands = monthly.loc[group_idx, "band_width_abs"].to_numpy(dtype=float)
+        directions = monthly.loc[group_idx, "candidate_direction"].to_numpy(dtype=int)
+        trade_counts = monthly.loc[group_idx, "month_trade_count"].to_numpy(dtype=int)
+
+        for pos in range(group_idx.size):
+            direction = directions[pos]
+            ref_price = refs[pos]
+            band_width = bands[pos]
+
+            if direction == 0 or not np.isfinite(ref_price) or not np.isfinite(band_width):
+                continue
+
+            forward_gap = months_ord[pos + 1:] - months_ord[pos]
+            if forward_gap.size == 0:
+                continue
+
+            future_positions = np.flatnonzero(forward_gap <= TREND_LOOKAHEAD_MONTHS) + pos + 1
+            if future_positions.size == 0:
+                continue
+
+            support_positions = future_positions[
+                direction * (prices[future_positions] - ref_price) >= band_width * TREND_SUPPORT_BAND_RATIO
+            ]
+            support_months = int(support_positions.size)
+            total_trades = int(trade_counts[pos] + trade_counts[support_positions].sum())
+
+            if support_months < TREND_MIN_SUPPORT_MONTHS or total_trades < TREND_MIN_TOTAL_TRADES:
+                continue
+
+            level_positions = np.concatenate(([pos], support_positions))
+            new_level = float(np.average(prices[level_positions], weights=trade_counts[level_positions]))
+            if not np.isfinite(new_level) or new_level <= 0:
+                continue
+
+            if abs(prices[pos] - new_level) / new_level > TREND_ALIGNMENT_TOLERANCE:
+                continue
+
+            sequence_idx = group_idx[level_positions]
+            trend_confirmed[sequence_idx] = True
+            for row_idx in sequence_idx:
+                if support_months >= trend_support_months[row_idx]:
+                    trend_support_months[row_idx] = support_months
+                    trend_total_trades[row_idx] = max(trend_total_trades[row_idx], total_trades)
+                    trend_ref_price[row_idx] = new_level
+
+    monthly["trend_confirmed"] = trend_confirmed
+    monthly["trend_support_months"] = trend_support_months
+    monthly["trend_total_trades"] = trend_total_trades
+    monthly["trend_ref_price"] = trend_ref_price
+    return monthly
+
+
+def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """A-3용 이상치 탐지 및 단지별 월별 시세 테이블을 생성한다.
+
+    탐지 기준:
+        그룹 단위 : aptSeq × area_repr
+        기준 시세 : 직전 관측월들의 trailing moving average
+        band      : max(rolling std × 2, moving average × 25%)
+        판정 방식 :
+            1. band 밖 거래는 우선 candidate 로 본다.
+            2. 같은 방향 거래가 이후 2개월 이상, 총 3건 이상 이어지면
+               일시적 이상치가 아니라 추세 전환으로 간주해 복원한다.
+            3. 추세 전환으로 인정된 월 안에서는 월별 중앙값 기준 robust band 로
+               개별 row 만 다시 점검한다.
+        제외 대상 : 1층 거래
+    """
+    logger.info(
+        "A-3 이상치 탐지 시작 "
+        f"(MA {BOLLINGER_WINDOW_MONTHS}개월 + Bollinger band, 최소 폭 {OUTLIER_THRESHOLD*100:.0f}%)..."
+    )
+
+    df = trade_df.dropna(subset=["date", "price_per_m2", "area_repr", "aptSeq"]).copy()
+    df["month"] = pd.to_datetime(df["month"])
+
+    floor_numeric = pd.to_numeric(df["floor"], errors="coerce")
+    n_before = len(df)
+    df = df[floor_numeric != 1].reset_index(drop=True)
+    logger.info(f"  1층 거래 제외: {n_before - len(df):,}건 → {len(df):,}건")
+
+    logger.info("  단지·면적·월 기준 moving-average band 계산 중...")
+    monthly = _compute_monthly_band_frame(df)
+    monthly = _annotate_trend_confirmation(monthly)
+
+    merge_cols = [
+        "aptSeq",
+        "area_repr",
+        "month",
+        "month_price_m2",
+        "month_trade_count",
+        "ref_month",
+        "ref_price",
+        "band_width_abs",
+        "band_lower",
+        "band_upper",
+        "band_width_pct",
+        "month_row_band_abs",
+        "trend_confirmed",
+        "trend_support_months",
+        "trend_total_trades",
+        "trend_ref_price",
+    ]
+    evaluated = df.merge(monthly[merge_cols], on=["aptSeq", "area_repr", "month"], how="left")
+
+    band_outlier = (
+        evaluated["ref_price"].notna()
+        & ~evaluated["trend_confirmed"].fillna(False)
+        & (
+            evaluated["price_per_m2"].lt(evaluated["band_lower"])
+            | evaluated["price_per_m2"].gt(evaluated["band_upper"])
+        )
+    )
+    trend_row_outlier = (
+        evaluated["trend_confirmed"].fillna(False)
+        & evaluated["month_trade_count"].fillna(0).ge(TREND_ROW_MIN_TRADE_COUNT)
+        & evaluated["month_price_m2"].notna()
+        & (evaluated["price_per_m2"] - evaluated["month_price_m2"]).abs().gt(evaluated["month_row_band_abs"])
+    )
+
+    evaluated["is_outlier"] = band_outlier | trend_row_outlier
+    evaluated["reference_type"] = np.where(
+        trend_row_outlier,
+        "trend_month_robust_band",
+        "moving_average_band",
+    )
+    evaluated["effective_ref_price"] = evaluated["ref_price"]
+    evaluated["effective_ref_month"] = evaluated["ref_month"]
+    evaluated["effective_band_width_abs"] = evaluated["band_width_abs"]
+    evaluated.loc[trend_row_outlier, "effective_ref_price"] = evaluated.loc[trend_row_outlier, "month_price_m2"]
+    evaluated.loc[trend_row_outlier, "effective_ref_month"] = evaluated.loc[trend_row_outlier, "month"]
+    evaluated.loc[trend_row_outlier, "effective_band_width_abs"] = evaluated.loc[trend_row_outlier, "month_row_band_abs"]
+    evaluated["effective_band_width_pct"] = np.where(
+        evaluated["effective_ref_price"] > 0,
+        evaluated["effective_band_width_abs"] / evaluated["effective_ref_price"] * 100,
+        np.nan,
+    )
+    evaluated["price_deviation_pct"] = np.where(
+        evaluated["effective_ref_price"] > 0,
+        (evaluated["price_per_m2"] - evaluated["effective_ref_price"]) / evaluated["effective_ref_price"] * 100,
+        np.nan,
+    )
+    evaluated["outlier_direction"] = pd.Series(pd.NA, index=evaluated.index, dtype="object")
+    has_deviation = evaluated["price_deviation_pct"].notna()
+    evaluated.loc[has_deviation & evaluated["price_deviation_pct"].gt(0), "outlier_direction"] = "고가이상치"
+    evaluated.loc[has_deviation & evaluated["price_deviation_pct"].le(0), "outlier_direction"] = "저가이상치"
+
+    outliers_df = evaluated[evaluated["is_outlier"]].copy()
+    outliers_df["ref_month"] = outliers_df["effective_ref_month"]
+    outliers_df["ref_price"] = outliers_df["effective_ref_price"]
+    outliers_df["band_width_pct"] = outliers_df["effective_band_width_pct"]
+    keep_cols = [
+        "month",
+        "date",
+        "aptSeq",
+        "apt_name",
+        "dong",
+        "dong_repr",
+        "area",
+        "area_repr",
+        "floor",
+        "construction_year",
+        "age",
+        "price",
+        "price_per_m2",
+        "ref_month",
+        "ref_price",
+        "band_width_pct",
+        "price_deviation_pct",
+        "outlier_direction",
+        "reference_type",
+        "trend_confirmed",
+        "trend_support_months",
+        "trend_total_trades",
+        "trend_ref_price",
+    ]
+    keep_cols = [c for c in keep_cols if c in outliers_df.columns]
+    outliers_df = outliers_df[keep_cols].sort_values(["aptSeq", "area_repr", "month", "date"]).reset_index(drop=True)
+
+    market_price_df = (
+        evaluated[~evaluated["is_outlier"]]
+        .groupby(["aptSeq", "area_repr", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "market_price_m2"})
+        .sort_values(["aptSeq", "area_repr", "month"])
+        .reset_index(drop=True)
+    )
+    market_price_df["month"] = pd.to_datetime(market_price_df["month"])
+
+    n_total = len(evaluated)
     n_outlier = len(outliers_df)
+    trend_seq_count = int(monthly["trend_confirmed"].sum())
     logger.info(
         f"A-3 완료: 이상치 {n_outlier:,}건 / {n_total:,}건 "
         f"({n_outlier / n_total * 100:.2f}%), "
-        f"최종 시세 {len(market_price_df):,}행 (단지×면적×월)"
+        f"추세 전환 월 {trend_seq_count:,}개, "
+        f"최종 시세 {len(market_price_df):,}행"
     )
     return outliers_df, market_price_df
 

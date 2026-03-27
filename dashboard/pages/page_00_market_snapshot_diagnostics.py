@@ -304,8 +304,10 @@ def _render_a3(outliers_df: pd.DataFrame, selected_code: str) -> None:
     st.subheader("A-3. 이상치·오류·비정상 거래 탐지")
     st.caption(
         "탐지 기준: 같은 단지(aptSeq) × 면적유형(area_repr) 기준, "
-        "직전 6개월 이내 월별 평균 시세 대비 ±25% 초과 거래 "
-        "| 사전 제외: 1층 거래, 직전 유효 거래 대비 연속 등락 25% 초과"
+        "직전 관측월 trailing moving average와 Bollinger band(최소 폭 25%)를 먼저 계산하고, "
+        "같은 방향 거래가 이후에도 이어지면 추세 전환으로 복원합니다. "
+        "추세 전환으로 인정된 월은 월별 중앙값 기준 robust band 로 다시 점검합니다. "
+        "| 사전 제외: 1층 거래"
     )
 
     if outliers_df.empty:
@@ -371,8 +373,8 @@ def _render_a3(outliers_df: pd.DataFrame, selected_code: str) -> None:
             labels={"price_deviation_pct": "편차 (%)"},
             height=280,
         )
-        fig_hist.add_vline(x=25, line_dash="dash", line_color="navy", annotation_text="+25%")
-        fig_hist.add_vline(x=-25, line_dash="dash", line_color="navy", annotation_text="-25%")
+        fig_hist.add_vline(x=25, line_dash="dash", line_color="navy", annotation_text="+25% 최소 band")
+        fig_hist.add_vline(x=-25, line_dash="dash", line_color="navy", annotation_text="-25% 최소 band")
         st.plotly_chart(fig_hist, width="stretch")
 
     # 이상치 산점도 (편차% vs 거래가)
@@ -384,14 +386,15 @@ def _render_a3(outliers_df: pd.DataFrame, selected_code: str) -> None:
             color="outlier_direction" if "outlier_direction" in sample.columns else None,
             color_discrete_map={"고가이상치": "crimson", "저가이상치": "steelblue"},
             hover_data=[c for c in ["apt_name", "dong", "area", "floor", "month",
-                                     "ref_price", "ref_month"] if c in sample.columns],
+                                     "ref_price", "ref_month", "reference_type",
+                                     "trend_support_months", "trend_total_trades"] if c in sample.columns],
             title="이상치 산점도 (거래가 vs 시세 대비 편차)",
             labels={"price_per_m2": "거래 ㎡당 가격 (만원/㎡)", "price_deviation_pct": "시세 대비 편차 (%)"},
             height=400,
             opacity=0.55,
         )
-        fig_scatter.add_hline(y=25,  line_dash="dash", line_color="crimson", annotation_text="+25% 임계")
-        fig_scatter.add_hline(y=-25, line_dash="dash", line_color="steelblue", annotation_text="-25% 임계")
+        fig_scatter.add_hline(y=25,  line_dash="dash", line_color="crimson", annotation_text="+25% 최소 band")
+        fig_scatter.add_hline(y=-25, line_dash="dash", line_color="steelblue", annotation_text="-25% 최소 band")
         st.plotly_chart(fig_scatter, width="stretch")
 
     # 케이스북 테이블
@@ -399,7 +402,8 @@ def _render_a3(outliers_df: pd.DataFrame, selected_code: str) -> None:
     case_cols = [
         "month", "dong", "apt_name", "area", "area_repr", "floor",
         "price", "price_per_m2",
-        "ref_month", "ref_price", "price_deviation_pct", "outlier_direction",
+        "ref_month", "ref_price", "band_width_pct", "price_deviation_pct",
+        "outlier_direction", "reference_type", "trend_support_months", "trend_total_trades",
     ]
     case_cols = [c for c in case_cols if c in df.columns]
     top_cases = (
@@ -411,6 +415,8 @@ def _render_a3(outliers_df: pd.DataFrame, selected_code: str) -> None:
     for date_col in ("month", "ref_month"):
         if date_col in top_cases.columns:
             top_cases[date_col] = pd.to_datetime(top_cases[date_col]).dt.strftime("%Y-%m")
+    if "band_width_pct" in top_cases.columns:
+        top_cases["band_width_pct"] = top_cases["band_width_pct"].round(1)
     if "price_deviation_pct" in top_cases.columns:
         top_cases["price_deviation_pct"] = top_cases["price_deviation_pct"].round(1)
     st.dataframe(top_cases, width="stretch", height=400)
