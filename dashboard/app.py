@@ -18,6 +18,7 @@ if str(_project_root) not in sys.path:
 NAVIGATION = {
     "📍 시장 한눈에 보기": {
         "데이터 진단 & 시장 스냅샷": ("dashboard.pages.page_00_market_snapshot_diagnostics", "render_snapshot"),
+        "취소·직거래 비율 진단": ("dashboard.pages.page_14_trade_filter_diagnostics", "render_trade_filter_diagnostics"),
         "거래량과 가격 흐름": ("dashboard.pages.page_01_overview", "render_volume"),
         "지역별 가격 순위": ("dashboard.pages.page_01_overview", "render_ranking"),
         "순위 변화 애니메이션": ("dashboard.pages.page_01_overview", "render_ranking_animation"),
