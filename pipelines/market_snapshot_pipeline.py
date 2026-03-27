@@ -190,26 +190,16 @@ def build_snapshot_monthly_trade(trade_df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(rows).sort_values(["sggCd", "month"]).reset_index(drop=True)
     result["month"] = pd.to_datetime(result["month"])
 
-    # Rolling 이동평균 (전체 집계 기준)
-    all_monthly = result[result["sggCd"] == "ALL"].set_index("month")["price_median_m2"]
-    rolling_map = {}
-    for window, col in [(3, "rolling_3m_median_m2"), (6, "rolling_6m_median_m2"), (12, "rolling_12m_median_m2")]:
-        roll = all_monthly.sort_index().rolling(window, min_periods=1).mean()
-        rolling_map[col] = roll
-
-    def _get_rolling(month: pd.Timestamp, col: str) -> float:
-        s = rolling_map[col]
-        return float(s.loc[month]) if month in s.index else np.nan
-
-    result["rolling_3m_median_m2"] = result["month"].map(
-        lambda m: _get_rolling(m, "rolling_3m_median_m2")
-    )
-    result["rolling_6m_median_m2"] = result["month"].map(
-        lambda m: _get_rolling(m, "rolling_6m_median_m2")
-    )
-    result["rolling_12m_median_m2"] = result["month"].map(
-        lambda m: _get_rolling(m, "rolling_12m_median_m2")
-    )
+    # Rolling 이동평균 (지역별 시계열 기준)
+    for window, col in [
+        (3, "rolling_3m_median_m2"),
+        (6, "rolling_6m_median_m2"),
+        (12, "rolling_12m_median_m2"),
+    ]:
+        result[col] = (
+            result.groupby("sggCd", sort=False)["price_median_m2"]
+            .transform(lambda s: s.rolling(window, min_periods=1).mean())
+        )
 
     return result
 

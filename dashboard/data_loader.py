@@ -166,12 +166,19 @@ def get_scope_option_list() -> list[str]:
 
 
 @st.cache_data(ttl=3600)
+def _load_cached_parquet(path_str: str, mtime_ns: int) -> pd.DataFrame:
+    """파일 수정 시각을 캐시 키에 포함해 parquet를 로드한다."""
+    del mtime_ns
+    return pd.read_parquet(path_str)
+
+
+@st.cache_data(ttl=3600)
 def load_snapshot_monthly_trade() -> pd.DataFrame:
     """Section A-1용 매매 월별 집계 데이터를 로드한다."""
     path = PREPROCESSED_PLUS_DIR / "snapshot_monthly_trade.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path)
+    df = _load_cached_parquet(str(path), path.stat().st_mtime_ns)
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
     return df
 
@@ -182,7 +189,7 @@ def load_snapshot_monthly_rent() -> pd.DataFrame:
     path = PREPROCESSED_PLUS_DIR / "snapshot_monthly_rent.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path)
+    df = _load_cached_parquet(str(path), path.stat().st_mtime_ns)
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
     return df
 
@@ -193,7 +200,7 @@ def load_snapshot_area_mix() -> pd.DataFrame:
     path = PREPROCESSED_PLUS_DIR / "snapshot_area_mix.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path)
+    df = _load_cached_parquet(str(path), path.stat().st_mtime_ns)
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
     return df
 
@@ -204,7 +211,7 @@ def load_snapshot_outliers() -> pd.DataFrame:
     path = PREPROCESSED_PLUS_DIR / "snapshot_outliers.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path)
+    df = _load_cached_parquet(str(path), path.stat().st_mtime_ns)
     if "month" in df.columns:
         df["month"] = pd.to_datetime(df["month"], errors="coerce")
     return df
