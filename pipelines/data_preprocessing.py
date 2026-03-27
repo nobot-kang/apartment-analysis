@@ -13,7 +13,7 @@ import numpy as np
 from loguru import logger
 from tqdm import tqdm
 
-from config.settings import MOLIT_RAW_DIR, PROCESSED_DIR
+from config.settings import ALL_REGIONS, MOLIT_RAW_DIR, PROCESSED_DIR, SEOUL_REGIONS
 
 
 class DataPreprocessor:
@@ -36,6 +36,8 @@ class DataPreprocessor:
         self.raw_dir = Path(raw_dir) if raw_dir else MOLIT_RAW_DIR
         self.processed_dir = Path(processed_dir) if processed_dir else PROCESSED_DIR
         self.processed_dir.mkdir(parents=True, exist_ok=True)
+        self.preprocessed_plus_dir = self.processed_dir.parent / "preprocessed_plus"
+        self.preprocessed_plus_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_all_parquets(self, sub_dir: str) -> pd.DataFrame:
         """지정한 하위 디렉토리 내의 모든 parquet 파일을 로드하여 병합한다.
@@ -77,6 +79,85 @@ class DataPreprocessor:
             정수형 Series.
         """
         return series.astype(str).str.replace(",", "").astype(int)
+
+    def _is_cancel_trade(self, series: pd.Series) -> pd.Series:
+        """취소 거래 여부를 반환한다."""
+        return series.fillna("").astype(str).str.strip().eq("O")
+
+    def _is_direct_trade(self, series: pd.Series) -> pd.Series:
+        """직거래 여부를 반환한다."""
+        return series.fillna("").astype(str).str.strip().eq("직거래")
+
+    def _build_trade_filter_yearly_summary(self, df: pd.DataFrame) -> pd.DataFrame:
+        """raw 매매 기준 연도·지역별 취소/직거래 비율 요약을 생성한다."""
+        required_cols = {"dealYear", "sggCd"}
+        if df.empty or not required_cols.issubset(df.columns):
+            return pd.DataFrame()
+
+        summary = df.copy()
+        summary["year"] = pd.to_numeric(summary["dealYear"], errors="coerce")
+        summary = summary.dropna(subset=["year"]).copy()
+        if summary.empty:
+            return pd.DataFrame()
+
+        summary["year"] = summary["year"].astype(int)
+        summary["sggCd"] = summary["sggCd"].astype(str).str.zfill(5)
+        summary["region_name"] = summary["sggCd"].map(ALL_REGIONS).fillna("기타")
+        seoul_codes = set(SEOUL_REGIONS.keys())
+        summary["region_type"] = np.where(summary["sggCd"].isin(seoul_codes), "서울", "경기")
+        summary["total_trade_count"] = 1
+        summary["cancel_trade_count"] = (
+            self._is_cancel_trade(summary["cdealType"]).astype(int)
+            if "cdealType" in summary.columns
+            else 0
+        )
+        summary["direct_trade_count"] = (
+            self._is_direct_trade(summary["dealingGbn"]).astype(int)
+            if "dealingGbn" in summary.columns
+            else 0
+        )
+
+        group_cols = ["sggCd", "region_name", "region_type", "year"]
+        yearly = (
+            summary.groupby(group_cols, observed=True, sort=True)[
+                ["total_trade_count", "cancel_trade_count", "direct_trade_count"]
+            ]
+            .sum()
+            .reset_index()
+        )
+
+        aggregate_rows: list[pd.DataFrame] = []
+        for code, name, region_type, mask in [
+            ("ALL", "전체", "전체", pd.Series(True, index=yearly.index)),
+            ("SEOUL", "서울 전체", "서울", yearly["region_type"].eq("서울")),
+            ("GYEONGGI", "경기 전체", "경기", yearly["region_type"].eq("경기")),
+        ]:
+            aggregate = (
+                yearly[mask]
+                .groupby("year", as_index=False)[["total_trade_count", "cancel_trade_count", "direct_trade_count"]]
+                .sum()
+            )
+            if aggregate.empty:
+                continue
+            aggregate["sggCd"] = code
+            aggregate["region_name"] = name
+            aggregate["region_type"] = region_type
+            aggregate_rows.append(aggregate[yearly.columns])
+
+        if aggregate_rows:
+            yearly = pd.concat([yearly, *aggregate_rows], ignore_index=True)
+
+        yearly["cancel_ratio_pct"] = np.where(
+            yearly["total_trade_count"] > 0,
+            yearly["cancel_trade_count"] / yearly["total_trade_count"] * 100,
+            np.nan,
+        )
+        yearly["direct_ratio_pct"] = np.where(
+            yearly["total_trade_count"] > 0,
+            yearly["direct_trade_count"] / yearly["total_trade_count"] * 100,
+            np.nan,
+        )
+        return yearly.sort_values(["sggCd", "year"]).reset_index(drop=True)
 
     # 84㎡ 환산 시 사용하는 기준 면적
     STANDARD_AREA_M2: float = 84.0
@@ -226,7 +307,7 @@ class DataPreprocessor:
     def preprocess_trade(self) -> pd.DataFrame:
         """매매 데이터를 전처리한다.
 
-        취소된 거래(cdealType == 'O')를 제외하고, 
+        취소 및 직거래를 제외하고,
         schema에 정의된 컬럼만 추출하여 1년 단위 조각으로 저장한다.
         """
         logger.info("매매 데이터 전처리 시작")
@@ -234,23 +315,37 @@ class DataPreprocessor:
         if df.empty:
             return df
 
+        # raw 기준 취소/직거래 비율 요약 저장
+        filter_summary = self._build_trade_filter_yearly_summary(df)
+        if not filter_summary.empty:
+            summary_path = self.preprocessed_plus_dir / "trade_filter_yearly_summary.parquet"
+            filter_summary.to_parquet(summary_path, index=False)
+            logger.info(f"거래 필터 요약 저장 완료: {summary_path} ({len(filter_summary)}행)")
+
         # 1) 취소 거래 제외
         if "cdealType" in df.columns:
             initial_count = len(df)
-            df = df[df["cdealType"] != "O"].copy()
+            df = df[~self._is_cancel_trade(df["cdealType"])].copy()
             cancelled_count = initial_count - len(df)
             logger.info(f"취소 거래 {cancelled_count}건 제외 완료")
 
-        # 2) 기본 컬럼 생성
+        # 2) 직거래 제외
+        if "dealingGbn" in df.columns:
+            initial_count = len(df)
+            df = df[~self._is_direct_trade(df["dealingGbn"])].copy()
+            direct_count = initial_count - len(df)
+            logger.info(f"직거래 {direct_count}건 제외 완료")
+
+        # 3) 기본 컬럼 생성
         df = self._create_base_columns(df)
 
-        # 3) 매매 전용 컬럼: price (dealAmount)
+        # 4) 매매 전용 컬럼: price (dealAmount)
         df["price"] = self._clean_amount(df["dealAmount"])
 
-        # 4) 가격 파생 컬럼 생성
+        # 5) 가격 파생 컬럼 생성
         df = self._add_trade_price_columns(df)
 
-        # 5) 필요한 컬럼만 선택
+        # 6) 필요한 컬럼만 선택
         cols = [
             "date", "price", "price_per_m2", "price_per_py", "price_std84",
             "area", "floor", "construction_year", "age",
@@ -259,7 +354,7 @@ class DataPreprocessor:
         cols = [c for c in cols if c in df.columns]
         processed_df = df[cols].sort_values("date").reset_index(drop=True)
 
-        # 6) 조각내어 저장 (GitHub 용량 제한 회피)
+        # 7) 조각내어 저장 (GitHub 용량 제한 회피)
         self._save_in_chunks(processed_df, "apt_trade")
         
         # 하위 호환성 또는 집계 편의를 위해 전체 파일도 일단 유지 (필요 없으면 삭제 가능)

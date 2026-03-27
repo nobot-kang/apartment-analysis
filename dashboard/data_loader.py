@@ -217,6 +217,18 @@ def load_snapshot_outliers() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=3600)
+def load_trade_filter_yearly_summary() -> pd.DataFrame:
+    """취소/직거래 필터링 비율 연도별 요약을 로드한다."""
+    path = PREPROCESSED_PLUS_DIR / "trade_filter_yearly_summary.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = _load_cached_parquet(str(path), path.stat().st_mtime_ns)
+    if "year" in df.columns:
+        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+    return df
+
+
 def get_region_options() -> dict[str, str]:
     """전체 지역 옵션을 반환한다."""
     return ALL_REGIONS
