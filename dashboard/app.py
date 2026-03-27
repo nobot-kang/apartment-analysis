@@ -33,6 +33,7 @@ def main() -> None:
         "전월세 분석": "dashboard/pages/03_rent_price.py",
         "거시지표": "dashboard/pages/04_macro_indicators.py",
         "복합 상관관계": "dashboard/pages/05_correlation.py",
+        "데이터 진단 & 시장 스냅샷": "dashboard/pages/06_market_snapshot.py",
     }
 
     selection = st.sidebar.radio("페이지 선택", list(pages.keys()))
@@ -51,6 +52,9 @@ def main() -> None:
         render()
     elif selection == "복합 상관관계":
         from dashboard.pages.page_05_correlation import render
+        render()
+    elif selection == "데이터 진단 & 시장 스냅샷":
+        from dashboard.pages.page_06_market_snapshot import render
         render()
 
 

@@ -17,6 +17,8 @@ if str(_project_root) not in sys.path:
 
 from config.settings import PROCESSED_DIR, ALL_REGIONS, SEOUL_REGIONS, GYEONGGI_REGIONS
 
+PREPROCESSED_PLUS_DIR: Path = _project_root / "data" / "preprocessed_plus"
+
 
 def _normalize_month_column(df: pd.DataFrame, ym_column: str = "ym") -> pd.DataFrame:
     """연월 컬럼을 문자열과 날짜형으로 정규화한다.
@@ -108,6 +110,51 @@ def load_macro_monthly() -> pd.DataFrame:
         macro_df = macro_df.copy()
         macro_df["date"] = pd.to_datetime(macro_df["date"], errors="coerce")
     return _normalize_month_column(macro_df)
+
+
+@st.cache_data(ttl=3600)
+def load_snapshot_monthly_trade() -> pd.DataFrame:
+    """Section A-1용 매매 월별 집계 데이터를 로드한다."""
+    path = PREPROCESSED_PLUS_DIR / "snapshot_monthly_trade.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df["month"] = pd.to_datetime(df["month"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_snapshot_monthly_rent() -> pd.DataFrame:
+    """Section A-1용 전월세 월별 집계 데이터를 로드한다."""
+    path = PREPROCESSED_PLUS_DIR / "snapshot_monthly_rent.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df["month"] = pd.to_datetime(df["month"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_snapshot_area_mix() -> pd.DataFrame:
+    """Section A-2용 면적 믹스 집계 데이터를 로드한다."""
+    path = PREPROCESSED_PLUS_DIR / "snapshot_area_mix.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df["month"] = pd.to_datetime(df["month"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_snapshot_outliers() -> pd.DataFrame:
+    """Section A-3용 이상치 탐지 결과를 로드한다."""
+    path = PREPROCESSED_PLUS_DIR / "snapshot_outliers.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    if "month" in df.columns:
+        df["month"] = pd.to_datetime(df["month"], errors="coerce")
+    return df
 
 
 def get_region_options() -> dict[str, str]:
