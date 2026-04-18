@@ -56,6 +56,21 @@ TREND_ROW_MIN_TRADE_COUNT: int = 3
 TREND_ROW_STD_MULTIPLIER: float = 2.5
 TREND_ROW_MIN_BAND_PCT: float = 0.08
 
+# A-3 v2: spread-based outlier detection
+PATH_WINDOW_MONTHS: int = 7
+PATH_MIN_PERIODS: int = 3
+SPREAD_WINDOW_MONTHS: int = 9
+SHRINK_K: int = 6
+BAND_Z: float = 3.0
+FLOOR_PCT_BASE: float = 0.18
+FLOOR_PCT_SPARSE_ADDON: float = 0.05
+SANITY_LOG_RATIO: float = 0.693          # ln(2.0)
+LEADER_SPREAD_MONTHS: int = 24
+LEADER_SPREAD_SIGN_RATIO: float = 0.80
+OLD_COMPLEX_AGE: int = 20
+RENOVATION_ABS_BUFFER_KRW: int = 50_000_000
+RENOVATION_REL_CAP: float = 0.12
+
 
 def _load_all_trade(processed_dir: Path) -> pd.DataFrame:
     """모든 apt_trade_*.parquet을 로드해 통합한다."""
@@ -341,11 +356,17 @@ def build_snapshot_area_mix(trade_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# A-3: 이상치·오류·비정상 거래 탐지
+# A-3: 이상치·오류·비정상 거래 탐지 (v2: spread-based)
 # ---------------------------------------------------------------------------
 
+def _centered_rolling_median(s: pd.Series, window: int, min_periods: int) -> pd.Series:
+    result = s.rolling(window, center=True, min_periods=min_periods).median()
+    result = result.ffill().bfill()
+    return result
+
+
 def _compute_monthly_band_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """단지×면적×월 대표가격과 moving-average band 를 계산한다."""
+    """단지×면적×월 대표가격과 moving-average band 를 계산한다 (legacy, trend 확인용)."""
     group_cols = ["aptSeq", "area_repr", "month"]
     monthly = (
         df.groupby(group_cols, observed=True, sort=True)["price_per_m2"]
@@ -481,25 +502,327 @@ def _annotate_trend_confirmation(monthly: pd.DataFrame) -> pd.DataFrame:
     return monthly
 
 
-def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """A-3용 이상치 탐지 및 단지별 월별 시세 테이블을 생성한다.
+def _build_cohort_paths(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """C1 (sggCd × area_bucket × month) 및 C2 (sggCd × month) 코호트 가격 경로를 계산한다."""
+    def _smooth_group(grp: pd.DataFrame, val_col: str, out_col: str) -> pd.DataFrame:
+        grp = grp.sort_values("month").copy()
+        log_vals = np.where(grp[val_col] > 0, np.log(grp[val_col]), np.nan)
+        smoothed = _centered_rolling_median(pd.Series(log_vals, index=grp.index), PATH_WINDOW_MONTHS, PATH_MIN_PERIODS)
+        grp[out_col] = np.exp(smoothed)
+        return grp
 
-    탐지 기준:
-        그룹 단위 : aptSeq × area_repr
-        기준 시세 : 직전 관측월들의 trailing moving average
-        band      : max(rolling std × 2, moving average × 25%)
-        판정 방식 :
-            1. band 밖 거래는 우선 candidate 로 본다.
-            2. 같은 방향 거래가 이후 2개월 이상, 총 3건 이상 이어지면
-               일시적 이상치가 아니라 추세 전환으로 간주해 복원한다.
-            3. 추세 전환으로 인정된 월 안에서는 월별 중앙값 기준 robust band 로
-               개별 row 만 다시 점검한다.
-        제외 대상 : 1층 거래
-    """
-    logger.info(
-        "A-3 이상치 탐지 시작 "
-        f"(MA {BOLLINGER_WINDOW_MONTHS}개월 + Bollinger band, 최소 폭 {OUTLIER_THRESHOLD*100:.0f}%)..."
+    # C1: sggCd × area_bucket × month
+    c1_raw = (
+        df.groupby(["sggCd", "area_bucket", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "_med"})
     )
+    c1_parts = []
+    for keys, grp in c1_raw.groupby(["sggCd", "area_bucket"], observed=True):
+        c1_parts.append(_smooth_group(grp, "_med", "path_c1_m2"))
+    c1_df = pd.concat(c1_parts, ignore_index=True)[["sggCd", "area_bucket", "month", "path_c1_m2"]]
+
+    # C2: sggCd × month
+    c2_raw = (
+        df.groupby(["sggCd", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "_med"})
+    )
+    c2_parts = []
+    for sgg, grp in c2_raw.groupby("sggCd", observed=True):
+        c2_parts.append(_smooth_group(grp, "_med", "path_c2_m2"))
+    c2_df = pd.concat(c2_parts, ignore_index=True)[["sggCd", "month", "path_c2_m2"]]
+
+    return c1_df, c2_df
+
+
+def _build_complex_spreads(
+    df: pd.DataFrame, c1_df: pd.DataFrame, c2_df: pd.DataFrame
+) -> pd.DataFrame:
+    """단지별 G0/G1/G2 스프레드 경로와 수축(shrinkage) 혼합 기준가를 계산한다."""
+
+    def _smooth_group_col(sub: pd.DataFrame, val_col: str, out_col: str) -> pd.DataFrame:
+        sub = sub.sort_values("month").copy()
+        log_vals = np.where(sub[val_col] > 0, np.log(sub[val_col]), np.nan)
+        smoothed = _centered_rolling_median(pd.Series(log_vals, index=sub.index), PATH_WINDOW_MONTHS, PATH_MIN_PERIODS)
+        sub[out_col] = np.exp(smoothed)
+        return sub
+
+    # G0: aptSeq × area_repr × month
+    g0_raw = (
+        df.groupby(["aptSeq", "area_repr", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "_g0_med"})
+    )
+    g0_parts = []
+    for keys, grp in g0_raw.groupby(["aptSeq", "area_repr"], observed=True):
+        g0_parts.append(_smooth_group_col(grp, "_g0_med", "path_g0_m2"))
+    g0_df = pd.concat(g0_parts, ignore_index=True)[["aptSeq", "area_repr", "month", "path_g0_m2"]]
+
+    # G1: aptSeq × area_bucket × month
+    df_with_bucket = df[["aptSeq", "area_bucket", "month", "price_per_m2"]].copy()
+    g1_raw = (
+        df_with_bucket.groupby(["aptSeq", "area_bucket", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "_g1_med"})
+    )
+    g1_parts = []
+    for keys, grp in g1_raw.groupby(["aptSeq", "area_bucket"], observed=True):
+        g1_parts.append(_smooth_group_col(grp, "_g1_med", "path_g1_m2"))
+    g1_df = pd.concat(g1_parts, ignore_index=True)[["aptSeq", "area_bucket", "month", "path_g1_m2"]]
+
+    # G2: aptSeq × month
+    g2_raw = (
+        df.groupby(["aptSeq", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "_g2_med"})
+    )
+    g2_parts = []
+    for apt, grp in g2_raw.groupby("aptSeq", observed=True):
+        g2_parts.append(_smooth_group_col(grp, "_g2_med", "path_g2_m2"))
+    g2_df = pd.concat(g2_parts, ignore_index=True)[["aptSeq", "month", "path_g2_m2"]]
+
+    # Merge sggCd and area_bucket onto G0 frame (take first value per aptSeq)
+    meta = df[["aptSeq", "area_repr", "sggCd", "area_bucket"]].drop_duplicates(["aptSeq", "area_repr"])
+    frame = g0_df.merge(meta, on=["aptSeq", "area_repr"], how="left")
+
+    # Merge G1
+    frame = frame.merge(g1_df, on=["aptSeq", "area_bucket", "month"], how="left")
+    # Merge G2
+    frame = frame.merge(g2_df, on=["aptSeq", "month"], how="left")
+    # Merge C1
+    frame = frame.merge(c1_df, on=["sggCd", "area_bucket", "month"], how="left")
+    # Merge C2
+    frame = frame.merge(c2_df, on=["sggCd", "month"], how="left")
+
+    # Cohort reference: prefer C1, fallback C2
+    frame["path_cohort_m2"] = frame["path_c1_m2"].where(frame["path_c1_m2"].notna(), frame["path_c2_m2"])
+    frame["cohort_level"] = np.where(frame["path_c1_m2"].notna(), "C1", "C2")
+
+    # Spreads in log space
+    log_cohort = np.where(frame["path_cohort_m2"] > 0, np.log(frame["path_cohort_m2"]), np.nan)
+    log_g0 = np.where(frame["path_g0_m2"] > 0, np.log(frame["path_g0_m2"]), np.nan)
+    log_g1 = np.where(frame["path_g1_m2"] > 0, np.log(frame["path_g1_m2"]), np.nan)
+    log_g2 = np.where(frame["path_g2_m2"] > 0, np.log(frame["path_g2_m2"]), np.nan)
+
+    frame["spread_g0"] = np.where(
+        np.isfinite(log_g0) & np.isfinite(log_cohort), log_g0 - log_cohort, np.nan
+    )
+    frame["spread_g1"] = np.where(
+        np.isfinite(log_g1) & np.isfinite(log_cohort), log_g1 - log_cohort, np.nan
+    )
+    frame["spread_g2"] = np.where(
+        np.isfinite(log_g2) & np.isfinite(log_cohort), log_g2 - log_cohort, np.nan
+    )
+
+    # n_12m: trailing 12-month G0 trade count per (aptSeq, area_repr)
+    trade_counts_monthly = (
+        df.groupby(["aptSeq", "area_repr", "month"], observed=True)
+        .size()
+        .reset_index(name="month_count")
+    )
+    trade_counts_monthly["month_ord"] = (
+        trade_counts_monthly["month"].dt.year * 12 + trade_counts_monthly["month"].dt.month
+    )
+
+    def _trailing_12m_count(sub: pd.DataFrame) -> pd.DataFrame:
+        sub = sub.sort_values("month_ord").copy()
+        counts = sub["month_count"].to_numpy(dtype=int)
+        ords = sub["month_ord"].to_numpy(dtype=int)
+        n12 = np.zeros(len(sub), dtype=int)
+        for i in range(len(sub)):
+            mask = (ords[i] - ords) < 12
+            mask[i] = False
+            n12[i] = int(counts[mask].sum()) + counts[i]
+        sub["n_12m"] = n12
+        return sub
+
+    trailing_parts = []
+    for keys, grp in trade_counts_monthly.groupby(["aptSeq", "area_repr"], observed=True):
+        trailing_parts.append(_trailing_12m_count(grp))
+    trailing_df = pd.concat(trailing_parts, ignore_index=True)[["aptSeq", "area_repr", "month", "n_12m", "month_count"]]
+    frame = frame.merge(trailing_df, on=["aptSeq", "area_repr", "month"], how="left")
+    frame["n_12m"] = frame["n_12m"].fillna(1).astype(int)
+    frame["month_count"] = frame["month_count"].fillna(1).astype(int)
+
+    # Shrinkage weight
+    w0 = frame["n_12m"] / (frame["n_12m"] + SHRINK_K)
+
+    # Best spread: coalesce G0, G1, G2, 0
+    best_spread = frame["spread_g0"].where(
+        frame["spread_g0"].notna(),
+        frame["spread_g1"].where(frame["spread_g1"].notna(), frame["spread_g2"].fillna(0.0)),
+    )
+    fallback_spread = frame["spread_g1"].where(
+        frame["spread_g1"].notna(),
+        frame["spread_g2"].fillna(0.0),
+    )
+    frame["spread_shrunk"] = w0 * best_spread + (1.0 - w0) * fallback_spread
+
+    # Reference price
+    path_cohort_c2_fallback = frame["path_cohort_m2"].where(
+        frame["path_cohort_m2"].notna(), frame["path_c2_m2"]
+    )
+    log_cohort_safe = np.where(
+        path_cohort_c2_fallback > 0, np.log(path_cohort_c2_fallback), np.nan
+    )
+    frame["ref_price_m2"] = np.exp(
+        np.where(np.isfinite(log_cohort_safe), log_cohort_safe + frame["spread_shrunk"].fillna(0.0), np.nan)
+    )
+
+    # Leader / isolated detection
+    frame["structure_type"] = "normal"
+    for (apt, area), grp in frame.groupby(["aptSeq", "area_repr"], observed=True):
+        grp_sorted = grp.sort_values("month")
+        month_ord = grp_sorted["month"].dt.year * 12 + grp_sorted["month"].dt.month
+        spreads_g0 = grp_sorted["spread_g0"].to_numpy(dtype=float)
+        max_ord = month_ord.max() if len(month_ord) else 0
+        window_mask = (max_ord - month_ord.to_numpy()) < LEADER_SPREAD_MONTHS
+        window_spreads = spreads_g0[window_mask]
+        valid = window_spreads[np.isfinite(window_spreads)]
+        if len(valid) >= 3:
+            pos_ratio = np.mean(valid > 0)
+            neg_ratio = np.mean(valid < 0)
+            dominant_ratio = max(pos_ratio, neg_ratio)
+            if dominant_ratio >= LEADER_SPREAD_SIGN_RATIO and abs(float(np.mean(valid))) > 0.15:
+                frame.loc[grp.index, "structure_type"] = "leader_or_isolated"
+
+    return frame[[
+        "aptSeq", "area_repr", "month", "path_cohort_m2", "cohort_level",
+        "spread_g0", "spread_g1", "spread_g2", "spread_shrunk", "ref_price_m2",
+        "n_12m", "structure_type", "path_g1_m2", "month_count",
+    ]]
+
+
+def _compute_dynamic_band(spreads_df: pd.DataFrame) -> pd.DataFrame:
+    """G0 그룹별 동적 band 폭(band_pct)을 계산한다."""
+    df = spreads_df.copy()
+
+    # group MAD of path_g0 relative to ref_price_m2
+    # We need path_g0_m2; reconstruct from spread_g0 + path_cohort_m2
+    path_cohort = df["path_cohort_m2"].to_numpy(dtype=float)
+    spread_g0 = df["spread_g0"].to_numpy(dtype=float)
+    log_cohort = np.where(path_cohort > 0, np.log(path_cohort), np.nan)
+    path_g0_m2 = np.where(
+        np.isfinite(log_cohort) & np.isfinite(spread_g0),
+        np.exp(log_cohort + spread_g0),
+        np.nan,
+    )
+    df["_path_g0_m2"] = path_g0_m2
+
+    def _group_mad(sub: pd.DataFrame) -> float:
+        g0 = sub["_path_g0_m2"].dropna()
+        ref = sub["ref_price_m2"].dropna()
+        common = sub.dropna(subset=["_path_g0_m2", "ref_price_m2"])
+        if len(common) < 2:
+            return np.nan
+        return float((common["_path_g0_m2"] - common["ref_price_m2"]).abs().median())
+
+    group_mad_map: dict[tuple, float] = {}
+    for keys, grp in df.groupby(["aptSeq", "area_repr"], observed=True):
+        group_mad_map[keys] = _group_mad(grp)
+
+    df["group_mad_m2"] = df.apply(
+        lambda r: group_mad_map.get((r["aptSeq"], r["area_repr"]), np.nan), axis=1
+    )
+
+    # Cohort sigma should reflect local path volatility, not long-term level drift.
+    # Using std(path level) over the whole history can explode when the market trends up/down.
+    def _cohort_return_sigma_pct(sub: pd.DataFrame) -> float:
+        unique_months = (
+            sub[["month", "path_cohort_m2"]]
+            .dropna(subset=["month", "path_cohort_m2"])
+            .drop_duplicates(subset=["month"])
+            .sort_values("month")
+        )
+        if len(unique_months) < 3:
+            return np.nan
+
+        log_path = np.log(unique_months["path_cohort_m2"].to_numpy(dtype=float))
+        log_returns = np.diff(log_path)
+        if log_returns.size < 2:
+            return np.nan
+
+        median_ret = float(np.median(log_returns))
+        mad_ret = float(np.median(np.abs(log_returns - median_ret)))
+        return mad_ret * 1.4826
+
+    if "sggCd" in df.columns and "area_bucket" in df.columns:
+        cohort_sigma_rows = []
+        for (sgg, area_bucket), grp in df.groupby(["sggCd", "area_bucket"], observed=True):
+            cohort_sigma_rows.append(
+                {
+                    "sggCd": sgg,
+                    "area_bucket": area_bucket,
+                    "cohort_return_sigma_pct": _cohort_return_sigma_pct(grp),
+                }
+            )
+        cohort_sigma_pct = pd.DataFrame(cohort_sigma_rows)
+        df = df.merge(cohort_sigma_pct, on=["sggCd", "area_bucket"], how="left")
+    else:
+        df["cohort_return_sigma_pct"] = np.nan
+
+    ref_arr = df["ref_price_m2"].to_numpy(dtype=float)
+    cohort_sigma_pct_arr = df["cohort_return_sigma_pct"].to_numpy(dtype=float)
+    cohort_sigma_m2 = np.where(
+        np.isfinite(cohort_sigma_pct_arr),
+        cohort_sigma_pct_arr * ref_arr,
+        np.nan,
+    )
+    df["cohort_sigma_m2"] = cohort_sigma_m2
+
+    group_mad = df["group_mad_m2"].to_numpy(dtype=float)
+    sigma_eff = np.where(
+        np.isfinite(group_mad) & np.isfinite(cohort_sigma_m2),
+        np.maximum(group_mad, cohort_sigma_m2),
+        np.where(np.isfinite(group_mad), group_mad, cohort_sigma_m2),
+    )
+    df["sigma_eff"] = sigma_eff
+
+    n_12m = df["n_12m"].to_numpy(dtype=float)
+    is_leader = df["structure_type"] == "leader_or_isolated"
+    floor_pct = np.where(n_12m <= SHRINK_K, FLOOR_PCT_BASE + FLOOR_PCT_SPARSE_ADDON, FLOOR_PCT_BASE)
+    floor_pct = np.where(is_leader, floor_pct + 0.05, floor_pct)
+
+    ref_safe = np.where(ref_arr > 0, ref_arr, np.nan)
+    band_z_contrib = np.where(
+        np.isfinite(sigma_eff) & np.isfinite(ref_safe),
+        BAND_Z * sigma_eff / ref_safe,
+        np.nan,
+    )
+    band_pct = np.where(
+        np.isfinite(band_z_contrib),
+        np.maximum(band_z_contrib, floor_pct),
+        floor_pct,
+    )
+    df["band_pct"] = band_pct
+    df["band_abs_m2"] = np.where(np.isfinite(ref_safe), band_pct * ref_safe, np.nan)
+
+    cols_to_drop = [c for c in ["_path_g0_m2"] if c in df.columns]
+    return df.drop(columns=cols_to_drop)
+
+
+def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """A-3용 이상치 탐지 및 단지별 월별 시세 테이블을 생성한다 (v2: spread-based).
+
+    탐지 기준 (v2):
+        그룹 단위   : aptSeq × area_repr
+        기준 시세   : 코호트(sggCd × area_bucket) 대비 shrinkage-blended spread 경로
+        band        : dynamic band = max(BAND_Z × sigma_eff, floor_pct)
+        판정 방식   :
+            1. sanity error: |log(price) - log(cohort)| > ln(2) AND |log(price) - log(ref)| > ln(2)
+            2. band candidate: |price - ref| / ref > band_pct
+            3. support confirmation: back 2M + forward 6M 지지 없으면 unsupported_jump
+            4. trend-month row-level robust band: 추세 전환으로 인정된 월 내 개별 spike
+            5. renovation buffer: 고령 단지 고가 이상치 완화
+        제외 대상   : 1층 거래
+    """
+    logger.info("A-3 v2 이상치 탐지 시작 (spread-based)...")
 
     df = trade_df.dropna(subset=["date", "price_per_m2", "area_repr", "aptSeq"]).copy()
     df["month"] = pd.to_datetime(df["month"])
@@ -509,38 +832,171 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
     df = df[floor_numeric != 1].reset_index(drop=True)
     logger.info(f"  1층 거래 제외: {n_before - len(df):,}건 → {len(df):,}건")
 
-    logger.info("  단지·면적·월 기준 moving-average band 계산 중...")
-    monthly = _compute_monthly_band_frame(df)
-    monthly = _annotate_trend_confirmation(monthly)
+    if "sggCd" not in df.columns:
+        df = _add_region_columns(df)
+    if "area_bucket" not in df.columns:
+        df = _add_area_bucket(df)
 
-    merge_cols = [
-        "aptSeq",
-        "area_repr",
-        "month",
-        "month_price_m2",
-        "month_trade_count",
-        "ref_month",
-        "ref_price",
-        "band_width_abs",
-        "band_lower",
-        "band_upper",
-        "band_width_pct",
-        "month_row_band_abs",
-        "trend_confirmed",
-        "trend_support_months",
-        "trend_total_trades",
-        "trend_ref_price",
+    logger.info("  코호트 가격 경로 계산 중...")
+    c1_df, c2_df = _build_cohort_paths(df)
+
+    logger.info("  단지별 스프레드 계산 중...")
+    spreads_df = _build_complex_spreads(df, c1_df, c2_df)
+
+    # Attach sggCd/area_bucket to spreads_df for dynamic band computation
+    meta = df[["aptSeq", "area_repr", "sggCd", "area_bucket"]].drop_duplicates(["aptSeq", "area_repr"])
+    spreads_df = spreads_df.merge(meta, on=["aptSeq", "area_repr"], how="left")
+
+    logger.info("  동적 band 계산 중...")
+    spreads_df = _compute_dynamic_band(spreads_df)
+
+    # Merge spreads onto individual trade rows
+    merge_spread_cols = [
+        "aptSeq", "area_repr", "month",
+        "path_cohort_m2", "cohort_level",
+        "spread_g0", "spread_g1", "spread_g2", "spread_shrunk",
+        "ref_price_m2", "n_12m", "structure_type",
+        "band_pct", "band_abs_m2",
+        "path_g1_m2", "month_count",
     ]
-    evaluated = df.merge(monthly[merge_cols], on=["aptSeq", "area_repr", "month"], how="left")
+    available_spread_cols = [c for c in merge_spread_cols if c in spreads_df.columns]
+    evaluated = df.merge(spreads_df[available_spread_cols], on=["aptSeq", "area_repr", "month"], how="left")
 
-    band_outlier = (
-        evaluated["ref_price"].notna()
-        & ~evaluated["trend_confirmed"].fillna(False)
-        & (
-            evaluated["price_per_m2"].lt(evaluated["band_lower"])
-            | evaluated["price_per_m2"].gt(evaluated["band_upper"])
-        )
+    ppm = evaluated["price_per_m2"].to_numpy(dtype=float)
+    ref_m2 = evaluated["ref_price_m2"].to_numpy(dtype=float)
+    cohort_m2 = evaluated["path_cohort_m2"].to_numpy(dtype=float)
+    band_pct_arr = evaluated["band_pct"].to_numpy(dtype=float)
+
+    log_ppm = np.where(ppm > 0, np.log(ppm), np.nan)
+    log_ref = np.where(ref_m2 > 0, np.log(ref_m2), np.nan)
+    log_cohort = np.where(cohort_m2 > 0, np.log(cohort_m2), np.nan)
+
+    # Stage 1 — sanity error
+    sanity_mask = (
+        np.isfinite(log_ref)
+        & np.isfinite(log_cohort)
+        & (np.abs(log_ppm - log_cohort) > SANITY_LOG_RATIO)
+        & (np.abs(log_ppm - log_ref) > SANITY_LOG_RATIO)
     )
+
+    # Stage 2 — band candidate
+    ref_valid = np.isfinite(ref_m2) & (ref_m2 > 0)
+    dev_ratio = np.where(ref_valid, np.abs(ppm - ref_m2) / ref_m2, np.nan)
+    candidate_mask = (
+        ref_valid
+        & ~sanity_mask
+        & np.isfinite(band_pct_arr)
+        & (dev_ratio > band_pct_arr)
+    )
+
+    # Stage 3 — support confirmation for candidates
+    # Build monthly median G0 prices per (aptSeq, area_repr, month) for support checking
+    monthly_g0 = (
+        evaluated.groupby(["aptSeq", "area_repr", "month"], observed=True)["price_per_m2"]
+        .median()
+        .reset_index()
+        .rename(columns={"price_per_m2": "_monthly_med"})
+    )
+    monthly_g0["_month_ord"] = monthly_g0["month"].dt.year * 12 + monthly_g0["month"].dt.month
+
+    is_supported = np.zeros(len(evaluated), dtype=bool)
+
+    evaluated_with_monthly = evaluated.copy()
+    evaluated_with_monthly["_row_idx"] = np.arange(len(evaluated))
+    evaluated_with_monthly["_month_ord"] = evaluated_with_monthly["month"].dt.year * 12 + evaluated_with_monthly["month"].dt.month
+
+    cand_indices = np.where(candidate_mask)[0]
+    if len(cand_indices) > 0:
+        group_index = monthly_g0.groupby(["aptSeq", "area_repr"], observed=True).indices
+        monthly_g0_arr_map: dict[tuple, tuple] = {}
+        for keys, grp_idx in group_index.items():
+            sub = monthly_g0.iloc[grp_idx].sort_values("_month_ord")
+            monthly_g0_arr_map[keys] = (sub["_month_ord"].to_numpy(dtype=int), sub["_monthly_med"].to_numpy(dtype=float))
+
+        g1_monthly = (
+            evaluated.groupby(["aptSeq", "area_bucket", "month"], observed=True)["price_per_m2"]
+            .median()
+            .reset_index()
+            .rename(columns={"price_per_m2": "_g1_med"})
+        ) if "area_bucket" in evaluated.columns else None
+
+        for row_i in cand_indices:
+            row = evaluated.iloc[row_i]
+            apt = row["aptSeq"]
+            area = row["area_repr"]
+            month_ord = int(row["month"].year * 12 + row["month"].month)
+            ref_val = float(ref_m2[row_i])
+            bpct = float(band_pct_arr[row_i])
+            direction = 1.0 if ppm[row_i] > ref_val else -1.0
+
+            if not np.isfinite(ref_val) or not np.isfinite(bpct):
+                continue
+
+            key = (apt, area)
+            if key not in monthly_g0_arr_map:
+                continue
+
+            ords, meds = monthly_g0_arr_map[key]
+            support_count = 0
+
+            # backward: 2 months
+            back_mask = ((month_ord - ords) > 0) & ((month_ord - ords) <= 2)
+            if np.any(back_mask):
+                back_meds = meds[back_mask]
+                back_support = direction * (back_meds - ref_val) >= bpct * ref_val * 0.5
+                support_count += int(np.sum(back_support))
+
+            # forward: 6 months
+            fwd_mask = ((ords - month_ord) > 0) & ((ords - month_ord) <= 6)
+            if np.any(fwd_mask):
+                fwd_meds = meds[fwd_mask]
+                fwd_support = direction * (fwd_meds - ref_val) >= bpct * ref_val * 0.5
+                support_count += int(np.sum(fwd_support))
+
+            if support_count >= 2:
+                is_supported[row_i] = True
+                continue
+
+            # G1 confirmation
+            if g1_monthly is not None and "area_bucket" in row.index:
+                bucket = row["area_bucket"]
+                g1_sub = g1_monthly[
+                    (g1_monthly["aptSeq"] == apt) & (g1_monthly["area_bucket"] == bucket)
+                ].sort_values("month")
+                if len(g1_sub) >= 2:
+                    g1_ords = (g1_sub["month"].dt.year * 12 + g1_sub["month"].dt.month).to_numpy(dtype=int)
+                    g1_meds = g1_sub["_g1_med"].to_numpy(dtype=float)
+                    adj_mask = (g1_ords != month_ord) & (np.abs(g1_ords - month_ord) <= 1)
+                    if np.any(adj_mask):
+                        g1_adj = g1_meds[adj_mask]
+                        g1_ref_diff = direction * (g1_adj - ref_val)
+                        if np.any(g1_ref_diff >= bpct * ref_val * 0.3):
+                            is_supported[row_i] = True
+
+    unsupported_mask = candidate_mask & ~is_supported
+
+    # Build is_outlier from spread-based logic
+    is_outlier_v2 = sanity_mask | unsupported_mask
+    outlier_reason_v2 = np.where(
+        sanity_mask, "sanity_error",
+        np.where(unsupported_mask, "unsupported_jump", ""),
+    )
+
+    # Legacy trend-month band pass (to keep backward compat for trend_month_robust_band)
+    logger.info("  추세 전환 월 row-level band 계산 중 (legacy)...")
+    monthly_legacy = _compute_monthly_band_frame(df)
+    monthly_legacy = _annotate_trend_confirmation(monthly_legacy)
+
+    legacy_merge_cols = [
+        "aptSeq", "area_repr", "month",
+        "month_price_m2", "month_trade_count",
+        "ref_month", "ref_price",
+        "band_width_abs", "band_lower", "band_upper", "band_width_pct",
+        "month_row_band_abs",
+        "trend_confirmed", "trend_support_months", "trend_total_trades", "trend_ref_price",
+    ]
+    evaluated = evaluated.merge(monthly_legacy[legacy_merge_cols], on=["aptSeq", "area_repr", "month"], how="left")
+
     trend_row_outlier = (
         evaluated["trend_confirmed"].fillna(False)
         & evaluated["month_trade_count"].fillna(0).ge(TREND_ROW_MIN_TRADE_COUNT)
@@ -548,83 +1004,122 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
         & (evaluated["price_per_m2"] - evaluated["month_price_m2"]).abs().gt(evaluated["month_row_band_abs"])
     )
 
-    evaluated["is_outlier"] = band_outlier | trend_row_outlier
-    evaluated["reference_type"] = np.where(
-        trend_row_outlier,
+    # Combine: spread-based OR trend-row outlier; trend-row takes precedence for reference_type
+    is_outlier_final = is_outlier_v2 | trend_row_outlier.to_numpy()
+
+    outlier_reason_final = outlier_reason_v2.copy()
+    outlier_reason_final = np.where(
+        trend_row_outlier.to_numpy() & ~is_outlier_v2,
         "trend_month_robust_band",
-        "moving_average_band",
+        outlier_reason_final,
     )
-    evaluated["effective_ref_price"] = evaluated["ref_price"]
-    evaluated["effective_ref_month"] = evaluated["ref_month"]
-    evaluated["effective_band_width_abs"] = evaluated["band_width_abs"]
-    evaluated.loc[trend_row_outlier, "effective_ref_price"] = evaluated.loc[trend_row_outlier, "month_price_m2"]
-    evaluated.loc[trend_row_outlier, "effective_ref_month"] = evaluated.loc[trend_row_outlier, "month"]
-    evaluated.loc[trend_row_outlier, "effective_band_width_abs"] = evaluated.loc[trend_row_outlier, "month_row_band_abs"]
-    evaluated["effective_band_width_pct"] = np.where(
-        evaluated["effective_ref_price"] > 0,
-        evaluated["effective_band_width_abs"] / evaluated["effective_ref_price"] * 100,
-        np.nan,
+
+    reference_type_arr = np.where(
+        trend_row_outlier.to_numpy(),
+        "trend_month_robust_band",
+        np.where(sanity_mask, "sanity_error", "moving_average_band"),
+    )
+
+    evaluated["is_outlier"] = is_outlier_final
+    evaluated["outlier_reason"] = outlier_reason_final
+    evaluated["reference_type"] = reference_type_arr
+    evaluated["renovation_buffer_applied"] = False
+
+    # Stage 4 — renovation buffer release
+    age_arr = pd.to_numeric(evaluated.get("age", pd.Series(0, index=evaluated.index)), errors="coerce").fillna(0)
+    ref_total = ref_m2 * evaluated["area"].to_numpy(dtype=float)
+    price_arr = evaluated["price"].to_numpy(dtype=float)
+    dev_pct_arr = np.where(ref_m2 > 0, (ppm - ref_m2) / ref_m2 * 100.0, np.nan)
+
+    reno_mask = (
+        is_outlier_final
+        & (ppm > ref_m2)
+        & (age_arr.to_numpy() >= OLD_COMPLEX_AGE)
+        & ((price_arr - ref_total) <= RENOVATION_ABS_BUFFER_KRW)
+        & (dev_pct_arr <= RENOVATION_REL_CAP * 100)
+    )
+    evaluated.loc[reno_mask, "is_outlier"] = False
+    evaluated.loc[reno_mask, "renovation_buffer_applied"] = True
+
+    # Compute final deviation columns
+    effective_ref_price = np.where(
+        trend_row_outlier.to_numpy(),
+        evaluated["month_price_m2"].to_numpy(dtype=float),
+        ref_m2,
     )
     evaluated["price_deviation_pct"] = np.where(
-        evaluated["effective_ref_price"] > 0,
-        (evaluated["price_per_m2"] - evaluated["effective_ref_price"]) / evaluated["effective_ref_price"] * 100,
+        effective_ref_price > 0,
+        (ppm - effective_ref_price) / effective_ref_price * 100.0,
         np.nan,
     )
     evaluated["outlier_direction"] = pd.Series(pd.NA, index=evaluated.index, dtype="object")
-    has_deviation = evaluated["price_deviation_pct"].notna()
-    evaluated.loc[has_deviation & evaluated["price_deviation_pct"].gt(0), "outlier_direction"] = "고가이상치"
-    evaluated.loc[has_deviation & evaluated["price_deviation_pct"].le(0), "outlier_direction"] = "저가이상치"
+    has_dev = evaluated["price_deviation_pct"].notna()
+    evaluated.loc[has_dev & evaluated["price_deviation_pct"].gt(0), "outlier_direction"] = "고가이상치"
+    evaluated.loc[has_dev & evaluated["price_deviation_pct"].le(0), "outlier_direction"] = "저가이상치"
+
+    # Backward-compat: ref_price uses legacy band ref where applicable, else spread ref
+    evaluated["ref_price"] = np.where(
+        trend_row_outlier.to_numpy(),
+        evaluated["month_price_m2"].to_numpy(dtype=float),
+        ref_m2,
+    )
+    evaluated["band_width_pct"] = np.where(
+        trend_row_outlier.to_numpy(),
+        evaluated["month_row_band_abs"].fillna(np.nan) / np.where(evaluated["month_price_m2"] > 0, evaluated["month_price_m2"], np.nan) * 100.0,
+        evaluated["band_pct"].fillna(np.nan) * 100.0,
+    )
+
+    # Diagnostic new columns
+    evaluated["ref_price_shrunk"] = ref_m2
+    evaluated["ref_price_total"] = ref_m2 * evaluated["area"].to_numpy(dtype=float)
+    evaluated["deviation_total_krw"] = price_arr - evaluated["ref_price_total"].to_numpy(dtype=float)
+
+    # trend_ref_price backward compat: use legacy value
+    # (already merged from monthly_legacy)
 
     outliers_df = evaluated[evaluated["is_outlier"]].copy()
-    outliers_df["ref_month"] = outliers_df["effective_ref_month"]
-    outliers_df["ref_price"] = outliers_df["effective_ref_price"]
-    outliers_df["band_width_pct"] = outliers_df["effective_band_width_pct"]
+
     keep_cols = [
-        "month",
-        "date",
-        "aptSeq",
-        "apt_name",
-        "dong",
-        "dong_repr",
-        "area",
-        "area_repr",
-        "floor",
-        "construction_year",
-        "age",
-        "price",
-        "price_per_m2",
-        "ref_month",
-        "ref_price",
-        "band_width_pct",
-        "price_deviation_pct",
-        "outlier_direction",
-        "reference_type",
-        "trend_confirmed",
-        "trend_support_months",
-        "trend_total_trades",
-        "trend_ref_price",
+        "month", "date", "aptSeq", "apt_name", "dong", "dong_repr",
+        "area", "area_repr", "floor", "construction_year", "age",
+        "price", "price_per_m2",
+        "ref_price", "band_width_pct", "price_deviation_pct",
+        "outlier_direction", "reference_type",
+        "trend_confirmed", "trend_support_months", "trend_total_trades", "trend_ref_price",
+        "path_cohort_m2", "spread_g0", "spread_g1", "spread_g2", "spread_shrunk",
+        "ref_price_shrunk", "ref_price_total", "structure_type", "cohort_level",
+        "deviation_total_krw", "renovation_buffer_applied", "outlier_reason",
     ]
     keep_cols = [c for c in keep_cols if c in outliers_df.columns]
     outliers_df = outliers_df[keep_cols].sort_values(["aptSeq", "area_repr", "month", "date"]).reset_index(drop=True)
 
     market_price_df = (
         evaluated[~evaluated["is_outlier"]]
-        .groupby(["aptSeq", "area_repr", "month"], observed=True)["price_per_m2"]
-        .median()
+        .groupby(["aptSeq", "area_repr", "month"], observed=True)
+        .agg(
+            market_price_m2=("price_per_m2", "median"),
+            trade_count=("price_per_m2", "size"),
+            renovation_buffer_count=("renovation_buffer_applied", "sum"),
+        )
         .reset_index()
-        .rename(columns={"price_per_m2": "market_price_m2"})
         .sort_values(["aptSeq", "area_repr", "month"])
         .reset_index(drop=True)
     )
+    market_price_df["renovation_buffer_count"] = market_price_df["renovation_buffer_count"].astype(int)
+    market_price_df["renovation_buffer_applied"] = market_price_df["renovation_buffer_count"] > 0
     market_price_df["month"] = pd.to_datetime(market_price_df["month"])
 
     n_total = len(evaluated)
-    n_outlier = len(outliers_df)
-    trend_seq_count = int(monthly["trend_confirmed"].sum())
+    n_outlier = int(evaluated["is_outlier"].sum())
+    n_sanity = int(np.sum(sanity_mask))
+    n_unsupported = int(np.sum(unsupported_mask))
+    n_reno = int(np.sum(reno_mask))
+    n_trend_row = int(trend_row_outlier.sum())
     logger.info(
-        f"A-3 완료: 이상치 {n_outlier:,}건 / {n_total:,}건 "
-        f"({n_outlier / n_total * 100:.2f}%), "
-        f"추세 전환 월 {trend_seq_count:,}개, "
+        f"A-3 v2 완료: 이상치 {n_outlier:,}건 / {n_total:,}건 "
+        f"({n_outlier / n_total * 100:.2f}%) | "
+        f"sanity_error={n_sanity}, unsupported_jump={n_unsupported}, "
+        f"trend_month_robust_band={n_trend_row}, renovation_buffer={n_reno}, "
         f"최종 시세 {len(market_price_df):,}행"
     )
     return outliers_df, market_price_df
