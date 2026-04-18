@@ -39,7 +39,22 @@ Dashboard (dashboard/)
 
 - **`pipelines/representative_complex_pipeline.py`** — derives the "representative complex" universe (59㎡ and 84㎡ type units) used in pages 10–13.
 
-- **`pipelines/market_snapshot_pipeline.py`** — market snapshot collection; diagnostics on page 00.
+- **`pipelines/market_snapshot_pipeline.py`** — 호환 shim. 실제 구현은 `pipelines/market_snapshot/` 패키지에 있다. 직접 실행 진입점(`uv run python pipelines/market_snapshot_pipeline.py`)과 기존 import 경로를 유지한다.
+
+- **`pipelines/market_snapshot/`** — Section A 집계 패키지.
+  - `config.py` — 파이프라인 전용 상수 (Bollinger 파라미터, spread 파라미터 등)
+  - `io.py` — `_load_all_trade` / `_load_all_rent`
+  - `preprocess.py` — region / area_bucket / month 컬럼 파생
+  - `snapshot_monthly.py` — A-1 매매·전월세 월별 집계
+  - `snapshot_area_mix.py` — A-2 면적 믹스 & 구성효과 분해
+  - `outliers/` — A-3 이상치 탐지 서브패키지
+    - `_smoothing.py` — 공용 로그 rolling-median helper
+    - `cohort_paths.py` — C1/C2 코호트 가격 경로
+    - `complex_spreads.py` — G0/G1/G2 spread + shrinkage 기준가
+    - `dynamic_band.py` — sigma_eff → band_pct 계산
+    - `trend_band.py` — legacy Bollinger band + 추세 전환 확인
+    - `pipeline.py` — `build_snapshot_outliers` 최종 조합 엔트리
+  - `runner.py` — `MarketSnapshotPipeline` 오케스트레이션
 
 ## Dashboard Pages
 
