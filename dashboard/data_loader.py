@@ -218,6 +218,18 @@ def load_snapshot_outliers() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def load_snapshot_complex_market_price() -> pd.DataFrame:
+    """Section A-3용 단지-월 시세(이상치 제외) 결과를 로드한다."""
+    path = PREPROCESSED_PLUS_DIR / "snapshot_complex_market_price.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = _load_cached_parquet(str(path), path.stat().st_mtime_ns)
+    if "month" in df.columns:
+        df["month"] = pd.to_datetime(df["month"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=3600)
 def load_trade_filter_yearly_summary() -> pd.DataFrame:
     """취소/직거래 필터링 비율 연도별 요약을 로드한다."""
     path = PREPROCESSED_PLUS_DIR / "trade_filter_yearly_summary.parquet"
