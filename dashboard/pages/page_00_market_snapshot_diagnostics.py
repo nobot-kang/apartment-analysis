@@ -96,6 +96,34 @@ A3_STRUCTURE_ORDER = [
 ]
 
 
+def _resolve_color_col(
+    mode: str,
+    reason_key: str | None,
+    available_columns: "Iterable[str]",
+) -> tuple[str, bool]:
+    """그래프 색상 컬럼과 폴백 여부를 반환한다.
+
+    Returns:
+        (color_col, fell_back_from_direction)
+        fell_back_from_direction=True 이면 caller 가 st.info 경고를 1회 표시해야 한다.
+    """
+    from collections.abc import Iterable  # noqa: PLC0415 — lazy import to keep module-level clean
+
+    cols = set(available_columns)
+
+    if mode == "reason":
+        return "판정사유", False
+
+    wants_direction = mode == "direction" or (mode == "auto" and reason_key is not None)
+    if wants_direction:
+        if "outlier_direction" in cols:
+            return "outlier_direction", False
+        return "판정사유", True  # old schema 폴백
+
+    # mode == "auto" and reason_key is None
+    return "판정사유", False
+
+
 def _ordered_present_keys(series: pd.Series, preferred_order: list[str]) -> list[str]:
     """선호 순서를 우선한 뒤 나머지 값을 정렬해 반환한다."""
     values = [str(v) for v in series.dropna().unique().tolist() if str(v).strip()]
@@ -491,8 +519,20 @@ def _render_a3(
         st.warning("필터 조건에 해당하는 이상치가 없습니다.")
         return
 
+    # 그래프 색상 기준 선택
+    color_mode = st.radio(
+        "그래프 색상 기준",
+        options=["auto", "reason", "direction"],
+        format_func={"auto": "자동 (필터 연동)", "reason": "판정사유", "direction": "고가/저가 방향"}.get,
+        horizontal=True,
+        key="a3_color_mode",
+    )
+    resolved_color_col, _direction_fallback = _resolve_color_col(color_mode, selected_reason_key, df.columns)
+    if _direction_fallback:
+        st.info("현재 데이터에 `outlier_direction` 컬럼이 없어 `판정사유` 기준으로 색칠합니다.")
+
     # 월별 이상치 건수 추이 (고가/저가 + 판정사유 분리)
-    color_col = "판정사유" if selected_reason_key is None else "outlier_direction"
+    color_col = resolved_color_col
     if color_col in df.columns:
         monthly_ct = (
             df.groupby(["month", color_col])
@@ -572,11 +612,10 @@ def _render_a3(
             "deviation_total_krw", "renovation_buffer_applied",
         ] if c in df.columns]
         sample = df.sample(min(3000, len(df)), random_state=42)
-        scatter_color = "판정사유" if selected_reason_key is None else "outlier_direction"
         fig_scatter = px.scatter(
             sample,
             x="price_per_m2", y="price_deviation_pct",
-            color=scatter_color,
+            color=resolved_color_col,
             color_discrete_map={
                 "고가이상치": "crimson", "저가이상치": "steelblue",
                 "지지 없는 단발 점프": "darkorange",
