@@ -65,7 +65,7 @@ from pipelines.market_snapshot.config import (  # noqa: F401
     LEADER_SPREAD_MONTHS,
     LEADER_SPREAD_SIGN_RATIO,
     OLD_COMPLEX_AGE,
-    RENOVATION_ABS_BUFFER_KRW,
+    RENOVATION_ABS_BUFFER_MANWON,
     RENOVATION_REL_CAP,
 )
 

@@ -69,6 +69,7 @@ A3_REASON_LABELS: dict[str, str] = {
     "unsupported_jump": "지지 없는 단발 점프",
     "sanity_error": "입력/단위 오류",
     "trend_month_robust_band": "추세월 내부 스파이크",
+    "abs_deviation": "절대 금액 이탈 (±3억)",
     "legacy_band_outlier": "legacy 밴드 이상치",
     "uncategorized": "미분류",
 }
@@ -77,6 +78,7 @@ A3_REASON_ORDER = [
     "unsupported_jump",
     "sanity_error",
     "trend_month_robust_band",
+    "abs_deviation",
     "legacy_band_outlier",
     "uncategorized",
 ]
@@ -545,6 +547,7 @@ def _render_a3(
             "지지 없는 단발 점프": "darkorange",
             "입력/단위 오류": "red",
             "추세월 내부 스파이크": "purple",
+            "절대 금액 이탈 (±3억)": "teal",
             "legacy 밴드 이상치": "indianred",
             "미분류": "gray",
         }
@@ -659,7 +662,7 @@ def _render_a3(
     if "spread_shrunk" in top_cases.columns:
         top_cases["spread_shrunk"] = top_cases["spread_shrunk"].round(3)
     if "deviation_total_krw" in top_cases.columns:
-        top_cases["deviation_total_krw"] = (top_cases["deviation_total_krw"] / 1e4).round(0).astype("Int64")
+        top_cases["deviation_total_krw"] = top_cases["deviation_total_krw"].round(0).astype("Int64")
         top_cases = top_cases.rename(columns={"deviation_total_krw": "편차(만원)"})
     st.dataframe(top_cases, width="stretch", height=400)
 

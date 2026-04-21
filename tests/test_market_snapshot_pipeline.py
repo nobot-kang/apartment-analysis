@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
+from loguru import logger as _loguru_logger
 
 from pipelines.market_snapshot_pipeline import (
     _add_area_bucket,
@@ -368,3 +370,454 @@ def test_dynamic_band_does_not_explode_from_cohort_level_trend() -> None:
         "Band should reflect local cohort volatility, not full-history level drift"
     )
     assert target_row["cohort_sigma_m2"] < target_row["ref_price_m2"] * 0.10
+
+
+# ===========================================================================
+# Outlier classification v2 update — tests 1-12
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Shared fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def loguru_records():
+    """Capture loguru INFO-level messages."""
+    records: list[str] = []
+    handle = _loguru_logger.add(records.append, level="INFO", format="{message}")
+    yield records
+    _loguru_logger.remove(handle)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _month_seq(start: str, n: int) -> list[pd.Timestamp]:
+    """Return n monthly timestamps starting from 'YYYY-MM'."""
+    base = pd.Period(start, freq="M")
+    return [(base + i).to_timestamp() for i in range(n)]
+
+
+def _flat_rows(
+    apt_seq: str,
+    ppm: float,
+    month_ts_list: list[pd.Timestamp],
+    *,
+    area: float = 84.0,
+    age: object = 10,
+    cy: int = 2010,
+    n: int = 2,
+) -> list[dict]:
+    """n trades per month at ppm. age may be np.nan."""
+    rows = []
+    prefix = apt_seq.split("-")[0]
+    for m in month_ts_list:
+        for i in range(n):
+            rows.append({
+                "date": m + pd.Timedelta(days=5 + i),
+                "month": m,
+                "aptSeq": apt_seq,
+                "area_repr": int(area),
+                "price_per_m2": float(ppm),
+                "price": int(ppm * area),
+                "area": float(area),
+                "floor": 10,
+                "construction_year": cy,
+                "age": age,
+                "dong": "테스트동",
+                "dong_repr": f"테스트동({prefix})",
+                "apt_name": "테스트아파트",
+            })
+    return rows
+
+
+def _single_row(
+    apt_seq: str,
+    *,
+    ppm: float | None = None,
+    price_manwon: int | None = None,
+    month_ts: pd.Timestamp,
+    area: float = 84.0,
+    age: object = 10,
+    cy: int = 2010,
+    day: int = 20,
+) -> dict:
+    """One trade row; specify either ppm or price_manwon."""
+    prefix = apt_seq.split("-")[0]
+    if price_manwon is not None:
+        p = int(price_manwon)
+        ppm_val = p / area
+    else:
+        assert ppm is not None
+        ppm_val = float(ppm)
+        p = int(ppm_val * area)
+    return {
+        "date": month_ts + pd.Timedelta(days=day - 1),
+        "month": month_ts,
+        "aptSeq": apt_seq,
+        "area_repr": int(area),
+        "price_per_m2": ppm_val,
+        "price": p,
+        "area": float(area),
+        "floor": 10,
+        "construction_year": cy,
+        "age": age,
+        "dong": "테스트동",
+        "dong_repr": f"테스트동({prefix})",
+        "apt_name": "테스트아파트",
+    }
+
+
+def _build_trend_reno_df(
+    new_level_ppm: float,
+    delta_manwon: int,
+    *,
+    area: float = 100.0,
+    age: int = 25,
+    cy: int = 1990,
+    start_month: str = "2020-01",
+) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """Fixture for renovation buffer tests via trend_month_robust_band path.
+
+    Month layout (offsets from start_month):
+      0-6  : baseline at baseline_ppm (7 months, 2 trades each, both apts)
+      7    : breakout at new_level (2 trades each)
+      8    : target — anchor 2 normal + reno-test 2 normal + 1 row outlier
+      9    : extra support at new_level (2 trades each)
+
+    Both "11110-anchor" and "11110-reno-test" share the same cohort so that
+    cohort path shifts to new_level, keeping spread-based ref_m2 ≈ new_level.
+    Returns (trade_df, target_month_ts).
+    """
+    baseline_ppm = new_level_ppm / 1.30
+    months = _month_seq(start_month, 10)
+    prefix = "11110"
+    rows: list[dict] = []
+
+    def _row(apt, p, m_ts, day=10):
+        return {
+            "date": m_ts + pd.Timedelta(days=day - 1),
+            "month": m_ts,
+            "aptSeq": apt,
+            "area_repr": int(area),
+            "price_per_m2": float(p),
+            "price": int(p * area),
+            "area": float(area),
+            "floor": 10,
+            "construction_year": cy,
+            "age": age,
+            "dong": "테스트동",
+            "dong_repr": f"테스트동({prefix})",
+            "apt_name": "테스트아파트",
+        }
+
+    for apt in ("11110-anchor", "11110-reno-test"):
+        for m in months[:7]:
+            rows += [_row(apt, baseline_ppm, m, 5), _row(apt, baseline_ppm, m, 10)]
+        # breakout
+        rows += [_row(apt, new_level_ppm, months[7], 5), _row(apt, new_level_ppm, months[7], 10)]
+        # target month — 2 normal trades
+        rows += [_row(apt, new_level_ppm, months[8], 5), _row(apt, new_level_ppm, months[8], 10)]
+        # extra support
+        rows += [_row(apt, new_level_ppm, months[9], 5), _row(apt, new_level_ppm, months[9], 10)]
+
+    # Target row for reno-test (price_manwon injection)
+    target_price = int(new_level_ppm * area) + delta_manwon
+    rows.append({
+        "date": months[8] + pd.Timedelta(days=20),
+        "month": months[8],
+        "aptSeq": "11110-reno-test",
+        "area_repr": int(area),
+        "price_per_m2": target_price / area,
+        "price": target_price,
+        "area": float(area),
+        "floor": 10,
+        "construction_year": cy,
+        "age": age,
+        "dong": "테스트동",
+        "dong_repr": f"테스트동({prefix})",
+        "apt_name": "테스트아파트",
+    })
+    return pd.DataFrame(rows), months[8]
+
+
+# ---------------------------------------------------------------------------
+# Test 1: first snapshot month is exempt
+# ---------------------------------------------------------------------------
+
+def test_exempt_first_month(monkeypatch) -> None:
+    """First snapshot month outlier is force-false; row still counts in market_price_df."""
+    monkeypatch.setattr("config.settings.START_YM", "202006")
+    months = _month_seq("2020-01", 12)
+    rows = (
+        _flat_rows("11110-anc", 100.0, months)
+        + _flat_rows("11110-b", 100.0, months[:5])
+        + _flat_rows("11110-b", 100.0, months[6:])
+    )
+    # log(210/100) ≈ 0.742 > ln(2) → sanity error at 2020-06 (first snapshot)
+    rows.append(_single_row("11110-b", ppm=210.0, month_ts=months[5]))
+    trade_df = pd.DataFrame(rows)
+    outliers_df, market_price_df = build_snapshot_outliers(trade_df)
+
+    assert len(outliers_df[outliers_df["month"] == months[5]]) == 0, (
+        "First-snapshot-month row must not appear in outliers"
+    )
+    mkt = market_price_df[
+        (market_price_df["aptSeq"] == "11110-b") & (market_price_df["month"] == months[5])
+    ]
+    assert len(mkt) > 0, "Exempt row should still be counted in market_price_df"
+
+
+# ---------------------------------------------------------------------------
+# Test 2: first snapshot period tracks START_YM via monkeypatch
+# ---------------------------------------------------------------------------
+
+def test_first_month_follows_start_ym_monkeypatch(monkeypatch) -> None:
+    """2020-06 outlier stays flagged when START_YM is shifted to 2020-03."""
+    months = _month_seq("2020-01", 12)
+    rows = (
+        _flat_rows("11110-anc", 100.0, months)
+        + _flat_rows("11110-b", 100.0, months[:5])
+        + _flat_rows("11110-b", 100.0, months[6:])
+    )
+    rows.append(_single_row("11110-b", ppm=210.0, month_ts=months[5]))
+    trade_df = pd.DataFrame(rows)
+
+    # With START_YM=202003, 2020-06 is NOT the first snapshot period → not exempt
+    monkeypatch.setattr("config.settings.START_YM", "202003")
+    outliers_df, _ = build_snapshot_outliers(trade_df)
+    assert len(outliers_df[outliers_df["month"] == months[5]]) >= 1, (
+        "2020-06 should still be flagged when START_YM=202003"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 3: age==0 + construction_year>0 + abs_deviation → exempt
+# ---------------------------------------------------------------------------
+
+def test_exempt_age_zero(monkeypatch) -> None:
+    """age==0 with valid construction_year is exempt regardless of deviation."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    months = _month_seq("2020-01", 14)
+    area = 200.0
+    bppm = 2000.0
+    rows = (
+        _flat_rows("11110-anc", bppm, months, area=area)
+        + _flat_rows("11110-b", bppm, months[:12], area=area, age=0, cy=2020)
+    )
+    # delta=35000 >> 30000 → abs_mask fires; but age=0 cy=2020 → exempt
+    rows.append(_single_row(
+        "11110-b", price_manwon=int(bppm * area) + 35_000,
+        month_ts=months[12], area=area, age=0, cy=2020,
+    ))
+    trade_df = pd.DataFrame(rows)
+    outliers_df, _ = build_snapshot_outliers(trade_df)
+    assert len(outliers_df[
+        (outliers_df["aptSeq"] == "11110-b") & (outliers_df["month"] == months[12])
+    ]) == 0, "age==0 with valid cy should be exempt"
+
+
+# ---------------------------------------------------------------------------
+# Test 4: age=NaN is NOT exempt (연식 미상 guard)
+# ---------------------------------------------------------------------------
+
+def test_age_nan_not_exempted(monkeypatch) -> None:
+    """age=NaN must not be treated as age==0 exempt."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    months = _month_seq("2020-01", 14)
+    area = 200.0
+    bppm = 2000.0
+    rows = (
+        _flat_rows("11110-anc", bppm, months, area=area)
+        + _flat_rows("11110-b", bppm, months[:12], area=area, age=np.nan, cy=0)
+    )
+    rows.append(_single_row(
+        "11110-b", price_manwon=int(bppm * area) + 35_000,
+        month_ts=months[12], area=area, age=np.nan, cy=0,
+    ))
+    trade_df = pd.DataFrame(rows)
+    outliers_df, _ = build_snapshot_outliers(trade_df)
+    assert len(outliers_df[
+        (outliers_df["aptSeq"] == "11110-b") & (outliers_df["month"] == months[12])
+    ]) >= 1, "age=NaN must NOT be exempt"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: abs_deviation fires when band_pct not exceeded
+# ---------------------------------------------------------------------------
+
+def test_abs_deviation_triggers_outlier(monkeypatch) -> None:
+    """abs_deviation reason fires even when relative dev is below band floor."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    months = _month_seq("2020-01", 14)
+    area = 200.0
+    bppm = 2000.0
+    rows = (
+        _flat_rows("11110-anc", bppm, months, area=area)
+        + _flat_rows("11110-b", bppm, months[:12], area=area)
+    )
+    # dev_ratio ≈ 15% < FLOOR_PCT_BASE 18% — no band candidate; abs_dev=30001 ≥ 30000
+    rows.append(_single_row(
+        "11110-b", price_manwon=int(bppm * area) + 30_001,
+        month_ts=months[12], area=area,
+    ))
+    trade_df = pd.DataFrame(rows)
+    outliers_df, _ = build_snapshot_outliers(trade_df)
+    b13 = outliers_df[
+        (outliers_df["aptSeq"] == "11110-b") & (outliers_df["month"] == months[12])
+    ]
+    assert len(b13) >= 1
+    assert b13.iloc[0]["outlier_reason"] == "abs_deviation"
+
+
+# ---------------------------------------------------------------------------
+# Test 6: sanity_error takes precedence over abs_deviation
+# ---------------------------------------------------------------------------
+
+def test_abs_deviation_priority_under_sanity(monkeypatch) -> None:
+    """sanity_error has higher priority than abs_deviation in outlier_reason."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    months = _month_seq("2020-01", 14)
+    area = 200.0
+    bppm = 2000.0
+    rows = (
+        _flat_rows("11110-anc", bppm, months, area=area)
+        + _flat_rows("11110-b", bppm, months[:12], area=area)
+    )
+    # log(5000/2000) ≈ 0.916 > ln(2) → sanity_error; also abs_dev ≫ 30000
+    rows.append(_single_row("11110-b", ppm=5000.0, month_ts=months[12], area=area))
+    trade_df = pd.DataFrame(rows)
+    outliers_df, _ = build_snapshot_outliers(trade_df)
+    b13 = outliers_df[
+        (outliers_df["aptSeq"] == "11110-b") & (outliers_df["month"] == months[12])
+    ]
+    assert len(b13) >= 1
+    assert b13.iloc[0]["outlier_reason"] == "sanity_error"
+
+
+# ---------------------------------------------------------------------------
+# Test 7: exempt row is counted in market_price_df (force-false not drop)
+# ---------------------------------------------------------------------------
+
+def test_market_price_includes_exempt(monkeypatch) -> None:
+    """Force-false exempt row contributes to market_price_df.trade_count."""
+    monkeypatch.setattr("config.settings.START_YM", "202006")
+    months = _month_seq("2020-01", 12)
+    rows = (
+        _flat_rows("11110-anc", 100.0, months)
+        + _flat_rows("11110-b", 100.0, months[:5])
+        + _flat_rows("11110-b", 100.0, months[6:])
+    )
+    rows.append(_single_row("11110-b", ppm=210.0, month_ts=months[5]))
+    trade_df = pd.DataFrame(rows)
+    _, market_price_df = build_snapshot_outliers(trade_df)
+    mkt = market_price_df[
+        (market_price_df["aptSeq"] == "11110-b") & (market_price_df["month"] == months[5])
+    ]
+    assert len(mkt) > 0
+    assert mkt.iloc[0]["trade_count"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Test 8: abs_mask boundary is in 만원 units (29999 < 30000 ≤ 30001)
+# ---------------------------------------------------------------------------
+
+def test_abs_threshold_unit_is_manwon(monkeypatch) -> None:
+    """Boundary: delta=29999 not outlier, delta=30001 is outlier (unit regression guard)."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    area = 200.0
+    bppm = 2000.0
+
+    def _run(delta: int) -> bool:
+        months = _month_seq("2020-01", 14)
+        rows = (
+            _flat_rows("11110-anc", bppm, months, area=area)
+            + _flat_rows("11110-b", bppm, months[:12], area=area)
+        )
+        rows.append(_single_row(
+            "11110-b", price_manwon=int(bppm * area) + delta,
+            month_ts=months[12], area=area,
+        ))
+        outliers_df, _ = build_snapshot_outliers(pd.DataFrame(rows))
+        return len(outliers_df[
+            (outliers_df["aptSeq"] == "11110-b") & (outliers_df["month"] == months[12])
+        ]) >= 1
+
+    assert not _run(29_999), "delta=29999 (below threshold) must NOT be flagged"
+    assert _run(30_001), "delta=30001 (above threshold) must be flagged"
+
+
+# ---------------------------------------------------------------------------
+# Tests 9-11: renovation buffer — trend_month_robust_band path
+# ---------------------------------------------------------------------------
+
+def test_renovation_abs_buffer_unit_is_manwon(monkeypatch) -> None:
+    """delta=6000 만원 > RENOVATION_ABS_BUFFER_MANWON(5000) → NOT released by renovation."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    trade_df, target_month = _build_trend_reno_df(600.0, 6_000)
+    outliers_df, _ = build_snapshot_outliers(trade_df)
+    target_rows = outliers_df[
+        (outliers_df["aptSeq"] == "11110-reno-test")
+        & (outliers_df["month"] == target_month)
+    ]
+    assert len(target_rows) >= 1, (
+        "delta=6000 exceeds renovation abs buffer → row must remain in outliers"
+    )
+    assert target_rows.iloc[0]["renovation_buffer_applied"] == False
+    assert target_rows.iloc[0]["reference_type"] == "trend_month_robust_band"
+
+
+def test_renovation_abs_buffer_within_limit(monkeypatch) -> None:
+    """delta=4000 만원 ≤ RENOVATION_ABS_BUFFER_MANWON(5000) + dev≤12% → released."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    trade_df, target_month = _build_trend_reno_df(400.0, 4_000)
+    outliers_df, market_price_df = build_snapshot_outliers(trade_df)
+    assert len(outliers_df[
+        (outliers_df["aptSeq"] == "11110-reno-test")
+        & (outliers_df["month"] == target_month)
+    ]) == 0, "delta=4000 within renovation buffer → row must be released"
+    mkt = market_price_df[
+        (market_price_df["aptSeq"] == "11110-reno-test")
+        & (market_price_df["month"] == target_month)
+    ]
+    assert len(mkt) > 0
+    assert mkt.iloc[0]["renovation_buffer_count"] >= 1
+
+
+def test_renovation_flag_cleared_for_exempt_row(monkeypatch) -> None:
+    """Case C: renovation would release + exempt condition → is_outlier=False,
+    renovation_buffer_applied=False (exempt takes credit, not renovation)."""
+    # target is months[8] = 2020-01 + 8 = 2020-09; set START_YM to that month
+    monkeypatch.setattr("config.settings.START_YM", "202009")
+    trade_df, target_month = _build_trend_reno_df(400.0, 4_000, start_month="2020-01")
+    outliers_df, market_price_df = build_snapshot_outliers(trade_df)
+
+    assert len(outliers_df[
+        (outliers_df["aptSeq"] == "11110-reno-test")
+        & (outliers_df["month"] == target_month)
+    ]) == 0, "Exempt first-month row must not appear in outliers"
+
+    mkt = market_price_df[
+        (market_price_df["aptSeq"] == "11110-reno-test")
+        & (market_price_df["month"] == target_month)
+    ]
+    if len(mkt) > 0:
+        assert mkt.iloc[0]["renovation_buffer_count"] == 0, (
+            "Case C: exempt clears renovation credit — buffer_count must be 0"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: missing age column does not crash
+# ---------------------------------------------------------------------------
+
+def test_missing_age_column_does_not_crash(monkeypatch) -> None:
+    """Pipeline completes without error when input has no age column."""
+    monkeypatch.setattr("config.settings.START_YM", "201001")
+    months = _month_seq("2020-01", 8)
+    rows = _flat_rows("11110-anc", 100.0, months) + _flat_rows("11110-b", 100.0, months)
+    trade_df = pd.DataFrame(rows).drop(columns=["age"])
+    outliers_df, market_price_df = build_snapshot_outliers(trade_df)
+    assert isinstance(outliers_df, pd.DataFrame)
+    assert isinstance(market_price_df, pd.DataFrame)

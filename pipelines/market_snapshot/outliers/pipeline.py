@@ -10,8 +10,9 @@ from pipelines.market_snapshot.config import (
     SANITY_LOG_RATIO,
     TREND_ROW_MIN_TRADE_COUNT,
     OLD_COMPLEX_AGE,
-    RENOVATION_ABS_BUFFER_KRW,
+    RENOVATION_ABS_BUFFER_MANWON,
     RENOVATION_REL_CAP,
+    ABS_DEVIATION_MANWON,
 )
 from pipelines.market_snapshot.preprocess import _add_region_columns, _add_area_bucket
 from pipelines.market_snapshot.outliers.cohort_paths import _build_cohort_paths
@@ -191,11 +192,24 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
 
     unsupported_mask = candidate_mask & ~is_supported
 
+    # Stage 2b — absolute deviation outlier (±3억 원)
+    ref_total_arr = ref_m2 * evaluated["area"].to_numpy(dtype=float)
+    price_arr = evaluated["price"].to_numpy(dtype=float)
+    abs_dev_manwon = np.abs(price_arr - ref_total_arr)
+    abs_mask = (
+        np.isfinite(ref_total_arr) & (ref_total_arr > 0)
+        & np.isfinite(abs_dev_manwon)
+        & (abs_dev_manwon >= ABS_DEVIATION_MANWON)
+        & ~sanity_mask
+        & ~unsupported_mask
+    )
+
     # Build is_outlier from spread-based logic
-    is_outlier_v2 = sanity_mask | unsupported_mask
+    is_outlier_v2 = sanity_mask | unsupported_mask | abs_mask
     outlier_reason_v2 = np.where(
         sanity_mask, "sanity_error",
-        np.where(unsupported_mask, "unsupported_jump", ""),
+        np.where(unsupported_mask, "unsupported_jump",
+        np.where(abs_mask, "abs_deviation", "")),
     )
 
     # Legacy trend-month band pass (to keep backward compat for trend_month_robust_band)
@@ -242,20 +256,49 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
     evaluated["renovation_buffer_applied"] = False
 
     # Stage 4 — renovation buffer release
-    age_arr = pd.to_numeric(evaluated.get("age", pd.Series(0, index=evaluated.index)), errors="coerce").fillna(0)
-    ref_total = ref_m2 * evaluated["area"].to_numpy(dtype=float)
-    price_arr = evaluated["price"].to_numpy(dtype=float)
+    raw_age = pd.to_numeric(
+        evaluated.get("age", pd.Series(np.nan, index=evaluated.index)),
+        errors="coerce",
+    )
+    age_arr = raw_age.fillna(0)
+    construction_year = pd.to_numeric(
+        evaluated.get("construction_year", pd.Series(0, index=evaluated.index)),
+        errors="coerce",
+    ).fillna(0)
+    ref_total = ref_total_arr   # already computed above (만원 단위)
     dev_pct_arr = np.where(ref_m2 > 0, (ppm - ref_m2) / ref_m2 * 100.0, np.nan)
 
     reno_mask = (
         is_outlier_final
         & (ppm > ref_m2)
         & (age_arr.to_numpy() >= OLD_COMPLEX_AGE)
-        & ((price_arr - ref_total) <= RENOVATION_ABS_BUFFER_KRW)
+        & ((price_arr - ref_total) <= RENOVATION_ABS_BUFFER_MANWON)
         & (dev_pct_arr <= RENOVATION_REL_CAP * 100)
     )
     evaluated.loc[reno_mask, "is_outlier"] = False
     evaluated.loc[reno_mask, "renovation_buffer_applied"] = True
+
+    # Stage 5 — exempt conditions (force-false): first snapshot month & age==0 신축
+    from config.settings import START_YM  # function-local import for monkeypatch
+    first_snapshot_period = pd.Period(f"{START_YM[:4]}-{START_YM[4:]}", freq="M")
+
+    first_month_mask = (
+        evaluated["month"].dt.to_period("M") == first_snapshot_period
+    ).to_numpy()
+
+    age_zero_exempt_mask = (
+        raw_age.notna()
+        & (raw_age == 0)
+        & (construction_year > 0)
+    ).to_numpy()
+
+    exempt_condition_mask = age_zero_exempt_mask | first_month_mask
+    live_is_outlier = evaluated["is_outlier"].to_numpy()
+    exempt_flipped_mask = live_is_outlier & exempt_condition_mask
+
+    evaluated.loc[exempt_flipped_mask, "is_outlier"] = False
+    # renovation 공로 재정의: 면제 조건 만족 행은 renovation 공로에서 제외
+    evaluated.loc[exempt_condition_mask, "renovation_buffer_applied"] = False
 
     # Compute final deviation columns
     effective_ref_price = np.where(
@@ -329,13 +372,22 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
     n_outlier = int(evaluated["is_outlier"].sum())
     n_sanity = int(np.sum(sanity_mask))
     n_unsupported = int(np.sum(unsupported_mask))
-    n_reno = int(np.sum(reno_mask))
+    n_abs = int(np.sum(abs_mask))
     n_trend_row = int(trend_row_outlier.sum())
+    n_reno_raw = int(np.sum(reno_mask))
+    n_reno_effective = int(evaluated["renovation_buffer_applied"].sum())
+    n_first_month_exempt = int(first_month_mask.sum())
+    n_age_zero_exempt = int(age_zero_exempt_mask.sum())
+    n_exempt_condition = int(exempt_condition_mask.sum())
+    n_exempt_flipped = int(exempt_flipped_mask.sum())
     logger.info(
         f"A-3 v2 완료: 이상치 {n_outlier:,}건 / {n_total:,}건 "
         f"({n_outlier / n_total * 100:.2f}%) | "
         f"sanity_error={n_sanity}, unsupported_jump={n_unsupported}, "
-        f"trend_month_robust_band={n_trend_row}, renovation_buffer={n_reno}, "
+        f"abs_deviation={n_abs}, trend_month_robust_band={n_trend_row}, "
+        f"renovation_buffer_raw={n_reno_raw}, renovation_buffer_effective={n_reno_effective}, "
+        f"first_month_exempt={n_first_month_exempt}, age_zero_exempt={n_age_zero_exempt}, "
+        f"exempt_condition_total={n_exempt_condition}, exempt_flipped={n_exempt_flipped}, "
         f"최종 시세 {len(market_price_df):,}행"
     )
     return outliers_df, market_price_df
