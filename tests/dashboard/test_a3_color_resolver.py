@@ -4,7 +4,7 @@ import pytest
 
 # Import the pure helper without triggering Streamlit's module-level side-effects.
 # The function lives at module top level so we can import it directly.
-from dashboard.pages.page_00_market_snapshot_diagnostics import _resolve_color_col
+from dashboard.pages.snapshot.a3_filters import _resolve_color_col
 
 COLS_WITH_DIRECTION = {"outlier_direction", "판정사유", "month"}
 COLS_WITHOUT_DIRECTION = {"판정사유", "month"}
