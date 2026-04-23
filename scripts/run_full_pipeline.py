@@ -24,6 +24,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from config.settings import (
 from pipelines.aggregation_pipeline import AggregationPipeline
 from pipelines.building_ledger_pipeline import BuildingLedgerPipeline
 from pipelines.building_ledger_summary import BuildingLedgerSummarizer
+from pipelines.cleaned_trade_pipeline import build_cleaned_trade
 from pipelines.data_preprocessing import DataPreprocessor
 from pipelines.ecos_pipeline import EcosPipeline
 from pipelines.market_pipeline import MarketPipeline
@@ -138,7 +140,7 @@ def run_building_ledger(mode: str = "incremental") -> None:
 def run_preprocessing() -> None:
     """Raw 데이터를 통합하고 1차 전처리를 수행한다."""
     logger.info("--- 1차 전처리 (Raw 통합 및 피처 생성) ---")
-    
+
     # 1. 아파트 정보 lookup table 생성
     logger.info("건축물대장 요약 중...")
     ledger_summarizer = BuildingLedgerSummarizer()
@@ -149,6 +151,19 @@ def run_preprocessing() -> None:
     preprocessor = DataPreprocessor()
     preprocessor.preprocess_trade()
     preprocessor.preprocess_rent()
+
+
+def run_cleaned_trade(strict: bool = False) -> None:
+    """cleaned_apt_trade 데이터셋을 생성한다. run_preprocessing() 직후에 호출."""
+    logger.info("--- cleaned_apt_trade 빌드 ---")
+    try:
+        build_cleaned_trade()
+        logger.info("cleaned_apt_trade 빌드 완료")
+    except Exception as exc:
+        if strict:
+            logger.error(f"cleaned_apt_trade 빌드 실패 (strict 모드): {exc}")
+            raise
+        logger.warning(f"CLEANED_PIPELINE_FAILED: {exc} (계속 진행)")
 
 
 def run_aggregation() -> None:
@@ -195,6 +210,16 @@ def main() -> None:
         "--skip-aggregation",
         action="store_true",
         help="집계 건너뛰기",
+    )
+    parser.add_argument(
+        "--skip-cleaned-trade",
+        action="store_true",
+        help="cleaned_apt_trade 빌드 건너뛰기",
+    )
+    parser.add_argument(
+        "--strict-cleaned-trade",
+        action="store_true",
+        help="cleaned_apt_trade 빌드 실패 시 전체 파이프라인 종료 (기본: warning 처리)",
     )
     parser.add_argument(
         "--skip-building-ledger",
@@ -245,6 +270,12 @@ def main() -> None:
     # 5. 1차 전처리 (통합 및 피처 생성)
     if not args.skip_aggregation:
         run_preprocessing()
+
+    # 5-1. cleaned_apt_trade 빌드 (preprocessing 직후, aggregation 전)
+    _ci_strict = os.environ.get("CI", "").lower() in ("true", "1", "yes")
+    _strict = args.strict_cleaned_trade or _ci_strict
+    if not args.skip_aggregation and not args.skip_cleaned_trade:
+        run_cleaned_trade(strict=_strict)
 
     # 6. 집계
     if not args.skip_aggregation:

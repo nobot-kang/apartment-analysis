@@ -179,7 +179,7 @@ class AggregationPipeline:
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
         """prefix로 시작하는 모든 전처리 parquet 조각을 읽어 합친다."""
-        files = sorted(self.output_dir.glob(f"{prefix}_*.parquet"))
+        files = sorted(self.output_dir.glob(f"{prefix}_[0-9][0-9][0-9][0-9].parquet"))
         if not files:
             full_path = self.output_dir / f"{prefix}.parquet"
             if full_path.exists():

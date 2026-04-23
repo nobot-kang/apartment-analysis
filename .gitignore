@@ -14,6 +14,12 @@ data/raw/
 data/processed/apt_trade.parquet
 data/processed/apt_rent.parquet
 
+# A-3 정제 매매 데이터 — 통합본만 차단 (LFS 임계 근접). 연도 청크는 추적.
+data/processed/cleaned_apt_trade.parquet
+
+# variant 산출물은 전체 무시 (실험성)
+data/processed/variants/
+
 # Python 캐시
 __pycache__/
 *.pyc

@@ -1,0 +1,126 @@
+{
+  "build_ts": "2026-04-23T16:12:38.088930+00:00",
+  "git_rev": "e312df4",
+  "row_counts": {
+    "input": 2992089,
+    "cleaned": 2961044,
+    "outlier": 31045,
+    "explicit_excluded": 0
+  },
+  "files": [
+    {
+      "path": "processed/cleaned_apt_trade_2010.parquet",
+      "size_bytes": 3487130,
+      "mtime_ns": 1776960756330079025,
+      "sha256": "fdba50587e3e4cd0051d5f221d5fd1b74bad220fed522f1169db2489a9258ff7"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2011.parquet",
+      "size_bytes": 4282753,
+      "mtime_ns": 1776960756380995012,
+      "sha256": "ed0a0b2d6517b266e15b2b5e644ee718879c92027a6a01ca4e9494e62cc96a08"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2012.parquet",
+      "size_bytes": 3316275,
+      "mtime_ns": 1776960756419581043,
+      "sha256": "1323b0f7d767f31e12e7afed93f3e5aa4a00ec19c5270026163fb9164b6422d2"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2013.parquet",
+      "size_bytes": 5062821,
+      "mtime_ns": 1776960756479017026,
+      "sha256": "189382d6bdb542292fbdde7a3fec907b9639ab317cc3ea2ea84af235dea0a5b9"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2014.parquet",
+      "size_bytes": 6048709,
+      "mtime_ns": 1776960756548184591,
+      "sha256": "b677e145dfd905ae74f540a22784693b7ea7e60ff3a40be79f72d5d0ad2cb233"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2015.parquet",
+      "size_bytes": 7440938,
+      "mtime_ns": 1776960756634410067,
+      "sha256": "aa9cc63a715996ffe72cf802a45d2412d80fef1430b0a283c171156467e81422"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2016.parquet",
+      "size_bytes": 6801305,
+      "mtime_ns": 1776960756709975005,
+      "sha256": "243c9590a71dc06bf51ac5a4530c2cb63ea7b92bf955a01de023ee837d839d45"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2017.parquet",
+      "size_bytes": 6369334,
+      "mtime_ns": 1776960756782005694,
+      "sha256": "ae028a9b222a4681a9fa54f7816c9226c2145f360e330a3a7dc4d240dd34da93"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2018.parquet",
+      "size_bytes": 5867181,
+      "mtime_ns": 1776960756852946675,
+      "sha256": "5cd28e66abd07e56cd3a9ecc83be24975e3aa796221a2ad1d1486580f1d3a3ea"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2019.parquet",
+      "size_bytes": 5587389,
+      "mtime_ns": 1776960756914122075,
+      "sha256": "80483e2aececcab3911eabc627f405038358ed1cf22688625850cc5a1f264dac"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2020.parquet",
+      "size_bytes": 7792773,
+      "mtime_ns": 1776960757001071509,
+      "sha256": "e0347657ecd2d2b491ef63ec6719bbdc461cf0b5f410383e8aeabbe97a36ad67"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2021.parquet",
+      "size_bytes": 4575155,
+      "mtime_ns": 1776960757051978245,
+      "sha256": "04f6ffc85d57cb9f98d70a31a63d1723265014d1144a195e3a794a609bd2248e"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2022.parquet",
+      "size_bytes": 1535061,
+      "mtime_ns": 1776960757068171033,
+      "sha256": "81ff53603a6d9a14b459535ce656809837e6d178ecf5536fc01c00497ec86227"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2023.parquet",
+      "size_bytes": 3327092,
+      "mtime_ns": 1776960757103660065,
+      "sha256": "0f0091a0c15977042103b7c6d0827dfa9fd617b8cb99980a9d50a23b2c212615"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2024.parquet",
+      "size_bytes": 4405323,
+      "mtime_ns": 1776960757150547093,
+      "sha256": "66cb0dec770b448b21b86dff26cf4817a86a37d6c40e4b1e77332048d7186f6a"
+    },
+    {
+      "path": "processed/cleaned_apt_trade_2025.parquet",
+      "size_bytes": 5466393,
+      "mtime_ns": 1776960757208490578,
+      "sha256": "df2f9d43dadd6805e0f1bb59e08ee316f7db7ca32013076ecb816ab04c045f0c"
+    },
+    {
+      "path": "processed/cleaned_apt_trade.parquet",
+      "size_bytes": 69888439,
+      "mtime_ns": 1776960758018345982,
+      "sha256": "14f13c98c90fc49f3905aac2373dd2b36fc881539247e6c227f0142fecd81526"
+    },
+    {
+      "path": "preprocessed_plus/cleaned_trade_yearly_summary.parquet",
+      "size_bytes": 39312,
+      "mtime_ns": 1776960758031521520,
+      "sha256": "47ccce436994c11e04a270d566421f153ed06215467f2650175ea075424bc8e6"
+    },
+    {
+      "path": "preprocessed_plus/cleaned_trade_outlier_reason_summary.parquet",
+      "size_bytes": 9289,
+      "mtime_ns": 1776960758032390603,
+      "sha256": "a70dbabdee19f65ce6dfdaf552f614c2147cb892835583ee09723fd34d58d30c"
+    }
+  ]
+}

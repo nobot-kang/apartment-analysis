@@ -24,7 +24,10 @@ from pipelines.market_snapshot.outliers.trend_band import (
 )
 
 
-def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_snapshot_outliers(
+    trade_df: pd.DataFrame,
+    return_verdicts: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """A-3용 이상치 탐지 및 단지별 월별 시세 테이블을 생성한다 (v2: spread-based).
 
     탐지 기준 (v2):
@@ -38,7 +41,13 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
             4. trend-month row-level robust band: 추세 전환으로 인정된 월 내 개별 spike
             5. renovation buffer: 고령 단지 고가 이상치 완화
         제외 대상   : 1층 거래
+
+    return_verdicts=True 일 때 3번째 원소로 row 단위 판정 DataFrame 반환.
+    반환 컬럼: row_id(int64), is_outlier(bool), outlier_reason(str).
+    floor==1 및 dropna 제외 행은 verdicts 에 포함되지 않는다.
     """
+    if return_verdicts and "row_id" not in trade_df.columns:
+        trade_df = trade_df.assign(row_id=np.arange(len(trade_df), dtype=np.int64))
     logger.info("A-3 v2 이상치 탐지 시작 (spread-based)...")
 
     df = trade_df.dropna(subset=["date", "price_per_m2", "area_repr", "aptSeq"]).copy()
@@ -390,4 +399,10 @@ def build_snapshot_outliers(trade_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
         f"exempt_condition_total={n_exempt_condition}, exempt_flipped={n_exempt_flipped}, "
         f"최종 시세 {len(market_price_df):,}행"
     )
+    if return_verdicts:
+        verdicts = evaluated[["row_id", "is_outlier", "outlier_reason"]].copy()
+        verdicts["is_outlier"] = verdicts["is_outlier"].astype(bool)
+        verdicts["outlier_reason"] = verdicts["outlier_reason"].astype(str)
+        verdicts["row_id"] = verdicts["row_id"].astype(np.int64)
+        return outliers_df, market_price_df, verdicts
     return outliers_df, market_price_df

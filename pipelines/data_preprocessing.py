@@ -106,22 +106,31 @@ class DataPreprocessor:
         seoul_codes = set(SEOUL_REGIONS.keys())
         summary["region_type"] = np.where(summary["sggCd"].isin(seoul_codes), "서울", "경기")
         summary["total_trade_count"] = 1
-        summary["cancel_trade_count"] = (
-            self._is_cancel_trade(summary["cdealType"]).astype(int)
+        is_cancel = (
+            self._is_cancel_trade(summary["cdealType"])
             if "cdealType" in summary.columns
-            else 0
+            else pd.Series(False, index=summary.index)
         )
-        summary["direct_trade_count"] = (
-            self._is_direct_trade(summary["dealingGbn"]).astype(int)
+        is_direct = (
+            self._is_direct_trade(summary["dealingGbn"])
             if "dealingGbn" in summary.columns
-            else 0
+            else pd.Series(False, index=summary.index)
         )
+        summary["cancel_trade_count"] = is_cancel.astype(int)
+        summary["direct_trade_count"] = is_direct.astype(int)
+        summary["cancel_only_count"] = (is_cancel & ~is_direct).astype(int)
+        summary["direct_only_count"] = (~is_cancel & is_direct).astype(int)
+        summary["cancel_and_direct_count"] = (is_cancel & is_direct).astype(int)
+        summary["after_cancel_direct_count"] = (~is_cancel & ~is_direct).astype(int)
 
+        _count_cols = [
+            "total_trade_count", "cancel_trade_count", "direct_trade_count",
+            "cancel_only_count", "direct_only_count", "cancel_and_direct_count",
+            "after_cancel_direct_count",
+        ]
         group_cols = ["sggCd", "region_name", "region_type", "year"]
         yearly = (
-            summary.groupby(group_cols, observed=True, sort=True)[
-                ["total_trade_count", "cancel_trade_count", "direct_trade_count"]
-            ]
+            summary.groupby(group_cols, observed=True, sort=True)[_count_cols]
             .sum()
             .reset_index()
         )
@@ -134,7 +143,7 @@ class DataPreprocessor:
         ]:
             aggregate = (
                 yearly[mask]
-                .groupby("year", as_index=False)[["total_trade_count", "cancel_trade_count", "direct_trade_count"]]
+                .groupby("year", as_index=False)[_count_cols]
                 .sum()
             )
             if aggregate.empty:

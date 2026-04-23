@@ -204,7 +204,7 @@ def _read_chunked_dataset(
             df = df[df["date"].dt.year.isin(target_years)].copy()
         return df
 
-    files = sorted(PROCESSED_DIR.glob(f"{prefix}_*.parquet"))
+    files = sorted(PROCESSED_DIR.glob(f"{prefix}_[0-9][0-9][0-9][0-9].parquet"))
     if target_years:
         filtered_files = []
         for file_path in files:
