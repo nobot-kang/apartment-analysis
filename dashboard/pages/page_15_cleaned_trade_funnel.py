@@ -118,7 +118,7 @@ def render_funnel() -> None:
             )
         )
         fig.update_layout(title=f"{selected_year}년 정제 단계별 잔존 건수", height=350)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # -----------------------------------------------------------------------
     # Middle: Stacked area chart (annual trend)
@@ -185,7 +185,7 @@ def render_funnel() -> None:
             yaxis_title="비율 (%)",
             height=380,
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     # -----------------------------------------------------------------------
     # Bottom: Outlier reason breakdown (stacked bar)
@@ -213,6 +213,6 @@ def render_funnel() -> None:
                 "trend_month_robust_band": "#3498db",
             },
         )
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width="stretch")
     else:
         st.info("이상치 유형 데이터가 없습니다.")
